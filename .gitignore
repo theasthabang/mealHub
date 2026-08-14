@@ -1,0 +1,26 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# env files
+.env
+**/.env
+.env.local
+.env.*.local
+
+# build output
+frontend/dist/
+backend/dist/
+build/
+
+# logs
+*.log
+npm-debug.log*
+
+# OS/editor
+.DS_Store
+.vscode/
+Thumbs.db
+
+# misc
+coverage/

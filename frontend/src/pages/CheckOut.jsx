@@ -10,34 +10,50 @@ import { setAddress, setLocation } from '../redux/mapSlice';
 import { MdDeliveryDining } from "react-icons/md";
 import { FaCreditCard } from "react-icons/fa";
 import axios from 'axios';
+import toast from 'react-hot-toast'
 import { FaMobileScreenButton } from "react-icons/fa6";
 import { useNavigate } from 'react-router-dom';
 import { serverUrl } from '../App';
-import { addMyOrder, setTotalAmount } from '../redux/userSlice';
-function RecenterMap({ location }) {
-  if (location.lat && location.lon) {
-    const map = useMap()
-    map.setView([location.lat, location.lon], 16, { animate: true })
-  }
-  return null
+import { addMyOrder, setTotalAmount, setUserData } from '../redux/userSlice';
+import { getErrorMessage } from '../utils/getErrorMessage';
+import MobileVerificationModal from '../components/MobileVerificationModal';
 
+// FIX (Hooks violation): useMap() must be called unconditionally on every render.
+// The old version called useMap() inside `if (location.lat && location.lon)`, which
+// breaks the Rules of Hooks the moment location starts unset and later gets set —
+// exactly what happens here, since location loads asynchronously. Now the hook is
+// called at the top level every render, and the conditional logic moves into an effect.
+function RecenterMap({ location }) {
+  const map = useMap()
+  useEffect(() => {
+    if (location.lat && location.lon) {
+      map.setView([location.lat, location.lon], 16, { animate: true })
+    }
+  }, [location.lat, location.lon])
+  return null
 }
 
 function CheckOut() {
   const { location, address } = useSelector(state => state.map)
-    const { cartItems ,totalAmount,userData} = useSelector(state => state.user)
+  const { cartItems, totalAmount, userData } = useSelector(state => state.user)
   const [addressInput, setAddressInput] = useState("")
   const [paymentMethod, setPaymentMethod] = useState("cod")
-  const navigate=useNavigate()
+  const navigate = useNavigate()
   const dispatch = useDispatch()
   const apiKey = import.meta.env.VITE_GEOAPIKEY
-  const deliveryFee=totalAmount>500?0:40
-  const AmountWithDeliveryFee=totalAmount+deliveryFee
+  const deliveryFee = totalAmount > 500 ? 0 : 40
+  const AmountWithDeliveryFee = totalAmount + deliveryFee
 
+  // NEW: checkout-time mobile verification. Shown as soon as the user reaches this
+  // page if they haven't verified a number yet — matches the required flow
+  // ("Checkout → check verified → OTP if needed → continue checkout"), rather than
+  // waiting until they click Place Order to surprise them with it.
+  const [showVerificationModal, setShowVerificationModal] = useState(!userData?.isMobileVerified)
 
-
-
-
+  const handleVerified = (verifiedMobile) => {
+    dispatch(setUserData({ ...userData, isMobileVerified: true, verifiedMobile }))
+    setShowVerificationModal(false)
+  }
 
   const onDragEnd = (e) => {
     const { lat, lng } = e.target._latlng
@@ -45,21 +61,18 @@ function CheckOut() {
     getAddressByLatLng(lat, lng)
   }
   const getCurrentLocation = () => {
-      const latitude=userData.location.coordinates[1]
-      const longitude=userData.location.coordinates[0]
-      dispatch(setLocation({ lat: latitude, lon: longitude }))
-      getAddressByLatLng(latitude, longitude)
-   
-
+    const latitude = userData.location.coordinates[1]
+    const longitude = userData.location.coordinates[0]
+    dispatch(setLocation({ lat: latitude, lon: longitude }))
+    getAddressByLatLng(latitude, longitude)
   }
 
   const getAddressByLatLng = async (lat, lng) => {
     try {
-
       const result = await axios.get(`https://api.geoapify.com/v1/geocode/reverse?lat=${lat}&lon=${lng}&format=json&apiKey=${apiKey}`)
       dispatch(setAddress(result?.data?.results[0].address_line2))
     } catch (error) {
-      console.log(error)
+      toast.error("Could not fetch address for this location")
     }
   }
 
@@ -69,70 +82,80 @@ function CheckOut() {
       const { lat, lon } = result.data.features[0].properties
       dispatch(setLocation({ lat, lon }))
     } catch (error) {
-      console.log(error)
+      toast.error("Could not find that address. Try a different search.")
     }
   }
 
-  const handlePlaceOrder=async () => {
+  const handlePlaceOrder = async () => {
+    // NEW: safety net — the modal can be dismissed with the X without verifying, so
+    // this re-checks before actually placing an order. The backend independently
+    // enforces this too (see placeOrder in order.controllers.js) regardless of what
+    // happens here; this just avoids a wasted round-trip that would fail anyway.
+    if (!userData?.isMobileVerified) {
+      setShowVerificationModal(true)
+      return
+    }
     try {
-      const result=await axios.post(`${serverUrl}/api/order/place-order`,{
+      const result = await axios.post(`${serverUrl}/api/order/place-order`, {
         paymentMethod,
-        deliveryAddress:{
-          text:addressInput,
-          latitude:location.lat,
-          longitude:location.lon
+        deliveryAddress: {
+          text: addressInput,
+          latitude: location.lat,
+          longitude: location.lon
         },
-        totalAmount:AmountWithDeliveryFee,
+        totalAmount: AmountWithDeliveryFee,
+        // NEW: deliveryFee was already being computed here for display, just never
+        // sent to the backend — needed now so delivery boy earnings can be calculated
+        // from the actual fee charged, instead of a flat guessed rate.
+        deliveryFee,
         cartItems
-      },{withCredentials:true})
+      }, { withCredentials: true })
 
-      if(paymentMethod=="cod"){
-      dispatch(addMyOrder(result.data))
-      navigate("/order-placed")
-      }else{
-        const orderId=result.data.orderId
-        const razorOrder=result.data.razorOrder
-          openRazorpayWindow(orderId,razorOrder)
-       }
-    
+      if (paymentMethod == "cod") {
+        dispatch(addMyOrder(result.data))
+        toast.success("Order placed successfully!")
+        navigate("/order-placed")
+      } else {
+        const orderId = result.data.orderId
+        const razorOrder = result.data.razorOrder
+        openRazorpayWindow(orderId, razorOrder)
+      }
     } catch (error) {
-      console.log(error)
+      toast.error(getErrorMessage(error))
     }
   }
 
-const openRazorpayWindow=(orderId,razorOrder)=>{
+  const openRazorpayWindow = (orderId, razorOrder) => {
+    const options = {
+      key: import.meta.env.VITE_RAZORPAY_KEY_ID,
+      amount: razorOrder.amount,
+      currency: 'INR',
+      name: "Vingo",
+      description: "Food Delivery Website",
+      order_id: razorOrder.id,
+      handler: async function (response) {
+        try {
+          const result = await axios.post(`${serverUrl}/api/order/verify-payment`, {
+            razorpay_payment_id: response.razorpay_payment_id,
+            orderId
+          }, { withCredentials: true })
+          dispatch(addMyOrder(result.data))
+          toast.success("Payment successful! Order placed.")
+          navigate("/order-placed")
+        } catch (error) {
+          toast.error(getErrorMessage(error))
+        }
+      }
+    }
 
-  const options={
- key:import.meta.env.VITE_RAZORPAY_KEY_ID,
- amount:razorOrder.amount,
- currency:'INR',
- name:"Vingo",
- description:"Food Delivery Website",
- order_id:razorOrder.id,
- handler:async function (response) {
-  try {
-    const result=await axios.post(`${serverUrl}/api/order/verify-payment`,{
-      razorpay_payment_id:response.razorpay_payment_id,
-      orderId
-    },{withCredentials:true})
-        dispatch(addMyOrder(result.data))
-      navigate("/order-placed")
-  } catch (error) {
-    console.log(error)
+    const rzp = new window.Razorpay(options)
+    rzp.open()
   }
- }
-  }
-
-  const rzp=new window.Razorpay(options)
-  rzp.open()
-
-
-}
-
 
   useEffect(() => {
     setAddressInput(address)
   }, [address])
+
   return (
     <div className='min-h-screen bg-[#fff9f6] flex items-center justify-center p-6'>
       <div className=' absolute top-[20px] left-[20px] z-[10]' onClick={() => navigate("/")}>
@@ -161,8 +184,6 @@ const openRazorpayWindow=(orderId,razorOrder)=>{
                 />
                 <RecenterMap location={location} />
                 <Marker position={[location?.lat, location?.lon]} draggable eventHandlers={{ dragend: onDragEnd }} />
-
-
               </MapContainer>
             </div>
           </div>
@@ -173,19 +194,16 @@ const openRazorpayWindow=(orderId,razorOrder)=>{
           <div className='grid grid-cols-1 sm:grid-cols-2 gap-4'>
             <div className={`flex items-center gap-3 rounded-xl border p-4 text-left transition ${paymentMethod === "cod" ? "border-[#ff4d2d] bg-orange-50 shadow" : "border-gray-200 hover:border-gray-300"
               }`} onClick={() => setPaymentMethod("cod")}>
-
               <span className='inline-flex h-10 w-10 items-center justify-center rounded-full bg-green-100'>
                 <MdDeliveryDining className='text-green-600 text-xl' />
               </span>
-              <div >
+              <div>
                 <p className='font-medium text-gray-800'>Cash On Delivery</p>
                 <p className='text-xs text-gray-500'>Pay when your food arrives</p>
               </div>
-
             </div>
             <div className={`flex items-center gap-3 rounded-xl border p-4 text-left transition ${paymentMethod === "online" ? "border-[#ff4d2d] bg-orange-50 shadow" : "border-gray-200 hover:border-gray-300"
               }`} onClick={() => setPaymentMethod("online")}>
-
               <span className='inline-flex h-10 w-10 items-center justify-center rounded-full bg-purple-100'>
                 <FaMobileScreenButton className='text-purple-700 text-lg' />
               </span>
@@ -202,32 +220,38 @@ const openRazorpayWindow=(orderId,razorOrder)=>{
 
         <section>
           <h2 className='text-lg font-semibold mb-3 text-gray-800'>Order Summary</h2>
-<div className='rounded-xl border bg-gray-50 p-4 space-y-2'>
-{cartItems.map((item,index)=>(
-  <div key={index} className='flex justify-between text-sm text-gray-700'>
-<span>{item.name} x {item.quantity}</span>
-<span>₹{item.price*item.quantity}</span>
-  </div>
- 
-))}
- <hr className='border-gray-200 my-2'/>
-<div className='flex justify-between font-medium text-gray-800'>
-  <span>Subtotal</span>
-  <span>{totalAmount}</span>
-</div>
-<div className='flex justify-between text-gray-700'>
-  <span>Delivery Fee</span>
-  <span>{deliveryFee==0?"Free":deliveryFee}</span>
-</div>
-<div className='flex justify-between text-lg font-bold text-[#ff4d2d] pt-2'>
-    <span>Total</span>
-  <span>{AmountWithDeliveryFee}</span>
-</div>
-</div>
+          <div className='rounded-xl border bg-gray-50 p-4 space-y-2'>
+            {cartItems.map((item, index) => (
+              <div key={index} className='flex justify-between text-sm text-gray-700'>
+                <span>{item.name} x {item.quantity}</span>
+                <span>₹{item.price * item.quantity}</span>
+              </div>
+            ))}
+            <hr className='border-gray-200 my-2' />
+            <div className='flex justify-between font-medium text-gray-800'>
+              <span>Subtotal</span>
+              <span>{totalAmount}</span>
+            </div>
+            <div className='flex justify-between text-gray-700'>
+              <span>Delivery Fee</span>
+              <span>{deliveryFee == 0 ? "Free" : deliveryFee}</span>
+            </div>
+            <div className='flex justify-between text-lg font-bold text-[#ff4d2d] pt-2'>
+              <span>Total</span>
+              <span>{AmountWithDeliveryFee}</span>
+            </div>
+          </div>
         </section>
-        <button className='w-full bg-[#ff4d2d] hover:bg-[#e64526] text-white py-3 rounded-xl font-semibold' onClick={handlePlaceOrder}> {paymentMethod=="cod"?"Place Order":"Pay & Place Order"}</button>
-
+        <button className='w-full bg-[#ff4d2d] hover:bg-[#e64526] text-white py-3 rounded-xl font-semibold' onClick={handlePlaceOrder}> {paymentMethod == "cod" ? "Place Order" : "Pay & Place Order"}</button>
       </div>
+
+      {showVerificationModal && (
+        <MobileVerificationModal
+          defaultMobile={userData?.mobile}
+          onVerified={handleVerified}
+          onClose={() => setShowVerificationModal(false)}
+        />
+      )}
     </div>
   )
 }

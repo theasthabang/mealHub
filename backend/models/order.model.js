@@ -22,9 +22,12 @@ const shopOrderSchema = new mongoose.Schema({
     },
     subtotal: Number,
     shopOrderItems: [shopOrderItemSchema],
+    // FIX (Phase 1): added "cancelled" — required for the cancelOrderItem feature.
+    // Without this, order.save() throws a Mongoose validation error the moment
+    // anyone tries to cancel a pending order.
     status:{
         type:String,
-        enum:["pending","preparing","out of delivery","delivered"],
+        enum:["pending","preparing","out of delivery","delivered","cancelled"],
         default:"pending"
     },
   assignment:{
@@ -46,6 +49,15 @@ otpExpires:{
     },
 deliveredAt:{
     type:Date,
+    default:null
+},
+// NEW (Phase 1): set by cancelOrderItem when a customer cancels a pending shop-order
+cancelledAt:{
+    type:Date,
+    default:null
+},
+cancelReason:{
+    type:String,
     default:null
 }
 
@@ -70,6 +82,14 @@ const orderSchema = new mongoose.Schema({
         type: Number
     }
     ,
+    // NEW: previously the delivery fee was only ever computed client-side in
+    // CheckOut.jsx and folded invisibly into totalAmount — there was no way to
+    // recover "just the delivery fee" from a saved order. Needed so delivery boy
+    // earnings (= delivery fee only, not food cost) can actually be calculated.
+    deliveryFee: {
+        type: Number,
+        default: 0
+    },
     shopOrders: [shopOrderSchema],
     payment:{
         type:Boolean,
@@ -84,6 +104,10 @@ const orderSchema = new mongoose.Schema({
        default:""
    }
 }, { timestamps: true })
+
+// NEW (Phase 3 candidate, not applied yet — flagging only): indexing `user` and
+// `shopOrders.owner` would speed up getMyOrders, which queries on both. Left out of
+// this patch since Phase 1 is model-shape-only; revisit in the indexing pass.
 
 const Order=mongoose.model("Order",orderSchema)
 export default Order

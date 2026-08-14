@@ -4,15 +4,18 @@ import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import { FaUtensils } from "react-icons/fa";
 import { useState } from 'react';
-import { useRef } from 'react';
+// FIX (dead code): removed unused `useRef` import
 import axios from 'axios';
+import toast from 'react-hot-toast'
 import { serverUrl } from '../App';
 import { setMyShopData } from '../redux/ownerSlice';
 import { ClipLoader } from 'react-spinners';
+import { getErrorMessage } from '../utils/getErrorMessage';
+
 function AddItem() {
     const navigate = useNavigate()
     const { myShopData } = useSelector(state => state.owner)
-    const [loading,setLoading]=useState(false)
+    const [loading, setLoading] = useState(false)
     const [name, setName] = useState("")
     const [price, setPrice] = useState(0)
     const [frontendImage, setFrontendImage] = useState(null)
@@ -42,8 +45,8 @@ function AddItem() {
         setLoading(true)
         try {
             const formData = new FormData()
-            formData.append("name",name)
-            formData.append("category",category)
+            formData.append("name", name)
+            formData.append("category", category)
             formData.append("foodType", foodType)
             formData.append("price", price)
             if (backendImage) {
@@ -51,10 +54,11 @@ function AddItem() {
             }
             const result = await axios.post(`${serverUrl}/api/item/add-item`, formData, { withCredentials: true })
             dispatch(setMyShopData(result.data))
-           setLoading(false)
-           navigate("/")
+            toast.success("Item added successfully")
+            setLoading(false)
+            navigate("/")
         } catch (error) {
-            console.log(error)
+            toast.error(getErrorMessage(error))
             setLoading(false)
         }
     }
@@ -118,22 +122,15 @@ function AddItem() {
 
                         >
                             <option value="veg" >veg</option>
- <option value="non veg" >non veg</option>
-
-
-
-
+                            <option value="non veg" >non veg</option>
                         </select>
                     </div>
 
                     <button className='w-full bg-[#ff4d2d] text-white px-6 py-3 rounded-lg font-semibold shadow-md hover:bg-orange-600 hover:shadow-lg transition-all duration-200 cursor-pointer' disabled={loading}>
-                      {loading?<ClipLoader size={20} color='white' />:"Save"}
+                        {loading ? <ClipLoader size={20} color='white' /> : "Save"}
                     </button>
                 </form>
             </div>
-
-
-
         </div>
     )
 }
