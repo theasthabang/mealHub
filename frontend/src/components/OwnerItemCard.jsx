@@ -17,7 +17,9 @@ function OwnerItemCard({ data }) {
     const handleDelete = async () => {
         setDeleting(true)
         try {
-            const result = await axios.get(`${serverUrl}/api/item/delete/${data._id}`, { withCredentials: true })
+            // FIX: route is now POST (see item.routes.js) — was GET, which mutates
+            // state (permanently deletes the item) with no CSRF protection.
+            const result = await axios.post(`${serverUrl}/api/item/delete/${data._id}`, {}, { withCredentials: true })
             dispatch(setMyShopData(result.data))
             toast.success("Item deleted")
         } catch (error) {

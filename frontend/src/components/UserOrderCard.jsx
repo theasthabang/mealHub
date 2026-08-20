@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { useDispatch } from 'react-redux'
 import toast from 'react-hot-toast'
 import { serverUrl } from '../App'
-import { cancelOrderStatus } from '../redux/userSlice'
+import { cancelOrderStatus, setItemRating } from '../redux/userSlice'
 import { getErrorMessage } from '../utils/getErrorMessage'
 
 // NEW: shown as a dropdown when the customer starts the cancel flow
@@ -19,7 +19,6 @@ const CANCEL_REASONS = [
 function UserOrderCard({ data }) {
     const navigate = useNavigate()
     const dispatch = useDispatch()
-    const [selectedRating, setSelectedRating] = useState({}) //itemId:rating
 
     // NEW: tracks which shopOrder (by _id) is currently mid-cancel-flow, and the
     // reason picked for it, so multiple shop-orders in one card don't interfere
@@ -36,12 +35,19 @@ function UserOrderCard({ data }) {
         })
     }
 
-    const handleRating = async (itemId, rating) => {
+    // FIX (rating resets after refetch/remount): previously stored the selected
+    // stars in local component state (selectedRating), keyed only by itemId — that
+    // state has no idea an order was already rated once this component remounts
+    // (navigating away and back, or myOrders refetching), so already-rated items
+    // silently went back to unselected stars. userRating is now read directly off
+    // each shopOrderItem, which persists it on the order in the database (see
+    // order.model.js / item.controllers.js), so it survives exactly those cases.
+    const handleRating = async (shopId, itemId, rating) => {
         try {
-            await axios.post(`${serverUrl}/api/item/rating`, { itemId, rating }, { withCredentials: true })
-            setSelectedRating(prev => ({
-                ...prev, [itemId]: rating
-            }))
+            const result = await axios.post(`${serverUrl}/api/item/rating`, {
+                orderId: data._id, shopId, itemId, rating
+            }, { withCredentials: true })
+            dispatch(setItemRating({ orderId: data._id, shopId, itemId, rating: result.data.userRating }))
             toast.success("Thanks for rating!")
         } catch (error) {
             toast.error(getErrorMessage(error))
@@ -102,7 +108,7 @@ function UserOrderCard({ data }) {
 
                                 {shopOrder.status == "delivered" && <div className='flex space-x-1 mt-2'>
                                     {[1, 2, 3, 4, 5].map((star) => (
-                                        <button key={star} className={`text-lg ${selectedRating[item.item._id] >= star ? 'text-yellow-400' : 'text-gray-400'}`} onClick={() => handleRating(item.item._id, star)}>★</button>
+                                        <button key={star} className={`text-lg ${item.userRating >= star ? 'text-yellow-400' : 'text-gray-400'}`} onClick={() => handleRating(shopOrder.shop._id, item.item._id, star)}>★</button>
                                     ))}
                                 </div>}
                             </div>
@@ -161,9 +167,30 @@ function UserOrderCard({ data }) {
                 </div>
             ))}
 
+            {/* NEW: once every shop-order in this whole order is either delivered or
+                cancelled, there's genuinely nothing left to track — the live map on
+                TrackOrderPage only ever renders while a shopOrder is still in
+                transit anyway (see TrackOrderPage.jsx), so clicking through was
+                always a dead end once fully delivered. Same disabled+dimmed
+                treatment already used for "Sold Out" items in FoodCard.jsx, for
+                visual consistency. */}
             <div className='flex justify-between items-center border-t pt-2'>
                 <p className='font-semibold'>Total: ₹{data.totalAmount}</p>
-                <button className='bg-[#ff4d2d] hover:bg-[#e64526] text-white px-4 py-2 rounded-lg text-sm' onClick={() => navigate(`/track-order/${data._id}`)}>Track Order</button>
+                {(() => {
+                    const isFullyFinished = data.shopOrders.every(so => so.status === "delivered" || so.status === "cancelled")
+                    return (
+                        <button
+                            className={`px-4 py-2 rounded-lg text-sm transition-colors ${isFullyFinished
+                                ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                                : "bg-[#ff4d2d] hover:bg-[#e64526] text-white"
+                                }`}
+                            disabled={isFullyFinished}
+                            onClick={() => { if (!isFullyFinished) navigate(`/track-order/${data._id}`) }}
+                        >
+                            {isFullyFinished ? "Delivered" : "Track Order"}
+                        </button>
+                    )
+                })()}
             </div>
         </div>
     )

@@ -61,14 +61,22 @@ function SignUp() {
         try {
             const provider = new GoogleAuthProvider()
             const result = await signInWithPopup(auth, provider)
+            // FIX (critical — account takeover): previously sent
+            // `{ fullName: result.user.displayName, email: result.user.email, role }`
+            // — the backend trusted those two fields at face value, with no proof
+            // either came from an actual Google sign-in. Now only the signed
+            // Firebase ID token goes over the wire; the backend derives email and
+            // fullName itself after independently verifying it. `idToken` is kept
+            // in `pendingGoogleUser` below so the mobile follow-up step (which
+            // makes a second request) can be verified the same way, rather than
+            // trusting the email/fullName that came back in this response.
+            const idToken = await result.user.getIdToken()
             const { data } = await axios.post(`${serverUrl}/api/auth/google-auth`, {
-                fullName: result.user.displayName,
-                email: result.user.email,
-                role
+                idToken, role
             }, { withCredentials: true })
 
             if (data.needsMobile) {
-                setPendingGoogleUser({ email: data.email, fullName: data.fullName })
+                setPendingGoogleUser({ email: data.email, fullName: data.fullName, idToken })
             } else {
                 dispatch(setUserData(data))
             }
@@ -80,9 +88,11 @@ function SignUp() {
         }
     }
 
-    // NEW: the follow-up step — completes account creation using the name/email
-    // already obtained from Google, plus the mobile number just typed in. No second
-    // Google popup needed.
+    // NEW: the follow-up step — completes account creation using the verified
+    // idToken from the popup above (re-sent, not the email/fullName that came
+    // back from the server — the backend re-verifies from the token every time
+    // rather than trusting anything client-held in between the two requests),
+    // plus the mobile number just typed in. No second Google popup needed.
     const handleCompleteGoogleSignup = async () => {
         if (!googleMobile || googleMobile.length < 10) {
             return toast.error("Please enter a valid mobile number")
@@ -90,8 +100,7 @@ function SignUp() {
         setGoogleLoading(true)
         try {
             const { data } = await axios.post(`${serverUrl}/api/auth/google-auth`, {
-                fullName: pendingGoogleUser.fullName,
-                email: pendingGoogleUser.email,
+                idToken: pendingGoogleUser.idToken,
                 mobile: googleMobile,
                 role
             }, { withCredentials: true })
@@ -109,7 +118,7 @@ function SignUp() {
             <div className={`bg-white rounded-xl shadow-lg w-full max-w-md p-8 border-[1px] `} style={{
                 border: `1px solid ${borderColor}`
             }}>
-                <h1 className={`text-3xl font-bold mb-2 `} style={{ color: primaryColor }}>Vingo</h1>
+                <h1 className={`text-3xl font-bold mb-2 `} style={{ color: primaryColor }}>MealHub</h1>
                 <p className='text-gray-600 mb-8'> Create your account to get started with delicious food deliveries
                 </p>
 

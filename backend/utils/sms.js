@@ -46,7 +46,7 @@ export const sendSmsOtp = async (mobile, otp) => {
     const body = new URLSearchParams({
         From: from,
         To: to,
-        Body: `Your Vingo verification code is ${otp}. It expires in 5 minutes. Do not share this code with anyone.`
+        Body: `Your MealHub verification code is ${otp}. It expires in 5 minutes. Do not share this code with anyone.`
     })
 
     // Twilio's REST API uses HTTP Basic Auth (Account SID as username, Auth Token as

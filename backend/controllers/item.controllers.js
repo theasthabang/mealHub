@@ -1,5 +1,6 @@
 import Item from "../models/item.model.js";
 import Shop from "../models/shop.model.js";
+import Order from "../models/order.model.js";
 import uploadOnCloudinary from "../utils/cloudinary.js";
 
 export const addItem = async (req, res) => {
@@ -198,14 +199,45 @@ export const searchItems = async (req, res) => {
 
 export const rating = async (req, res) => {
     try {
-        const { itemId, rating } = req.body
+        const { orderId, shopId, itemId, rating } = req.body
 
-        if (!itemId || !rating) {
-            return res.status(400).json({ message: "itemId and rating is required" })
+        // FIX (persistence + missing checks): previously took only {itemId, rating}.
+        // Nothing tied a rating to a specific order, so there was no way to persist
+        // "did this user already rate this delivery" anywhere — the frontend could
+        // only hold selected stars in local component state, which reset to
+        // unselected on every remount or refetch (exactly the "stars go back to
+        // gray after reload" behavior being fixed here). It also meant nothing
+        // stopped this endpoint being called repeatedly for an item the requester
+        // never ordered, or for an order that isn't even delivered yet — orderId/
+        // shopId let this now check both.
+        if (!orderId || !shopId || !itemId || !rating) {
+            return res.status(400).json({ message: "orderId, shopId, itemId and rating are required" })
         }
 
         if (rating < 1 || rating > 5) {
             return res.status(400).json({ message: "rating must be between 1 to 5" })
+        }
+
+        const order = await Order.findById(orderId)
+        if (!order || String(order.user) !== String(req.userId)) {
+            return res.status(403).json({ message: "not authorized to rate this order" })
+        }
+
+        const shopOrder = order.shopOrders.find(so => String(so.shop) === String(shopId))
+        if (!shopOrder) {
+            return res.status(400).json({ message: "shop order not found" })
+        }
+
+        // Matches the frontend's own gating (UserOrderCard only shows stars once
+        // shopOrder.status == "delivered") — enforced server-side too, since a
+        // frontend check alone is just UI, not a guarantee.
+        if (shopOrder.status !== "delivered") {
+            return res.status(400).json({ message: "you can only rate items after they've been delivered" })
+        }
+
+        const shopOrderItem = shopOrder.shopOrderItems.find(i => String(i.item) === String(itemId))
+        if (!shopOrderItem) {
+            return res.status(400).json({ message: "item not found in this order" })
         }
 
         const item = await Item.findById(itemId)
@@ -213,13 +245,35 @@ export const rating = async (req, res) => {
             return res.status(400).json({ message: "item not found" })
         }
 
-        const newCount = item.rating.count + 1
-        const newAverage = (item.rating.average * item.rating.count + rating) / newCount
+        if (shopOrderItem.userRating) {
+            // FIX (double-counting): re-rating the same order line used to run the
+            // exact same "newCount = count + 1" logic as a first-time rating, so
+            // changing a star rating from (say) 3 to 5 would count as a SECOND vote
+            // on top of the original one — inflating `count` and skewing the
+            // average every time someone changed their mind. This branch instead
+            // adjusts the existing average in place, using the difference between
+            // the old and new rating, without touching count at all.
+            const oldRating = shopOrderItem.userRating
+            item.rating.average = item.rating.count > 0
+                ? ((item.rating.average * item.rating.count) - oldRating + rating) / item.rating.count
+                : rating
+        } else {
+            const newCount = item.rating.count + 1
+            item.rating.average = (item.rating.average * item.rating.count + rating) / newCount
+            item.rating.count = newCount
+        }
 
-        item.rating.count = newCount
-        item.rating.average = newAverage
+        shopOrderItem.userRating = rating
         await item.save()
-        return res.status(200).json({ rating: item.rating })
+        await order.save()
+
+        return res.status(200).json({
+            rating: item.rating,
+            userRating: shopOrderItem.userRating,
+            orderId: order._id,
+            shopId,
+            itemId
+        })
 
     } catch (error) {
         return res.status(500).json({ message: `rating error ${error}` })

@@ -5,6 +5,7 @@ import bcrypt from "bcryptjs"
 import genToken from "../utils/token.js"
 import { sendOtpMail } from "../utils/mail.js"
 import { sendSmsOtp } from "../utils/sms.js"
+import { verifyFirebaseIdToken } from "../utils/firebaseAdmin.js"
 import crypto from "crypto"
 
 // NEW (deployment readiness): the cookie config was hardcoded `secure: false` and
@@ -157,23 +158,60 @@ export const resetPassword = async (req, res) => {
 
 export const googleAuth = async (req, res) => {
     try {
-        const { fullName, email, mobile, role } = req.body
+        const { idToken, mobile, role } = req.body
+
+        if (!idToken) {
+            return res.status(400).json({ message: "Google authentication token is missing." })
+        }
+
+        // FIX (critical — account takeover): this endpoint previously trusted
+        // whatever `email` (and `fullName`) the client sent in the request body,
+        // with NO proof they actually own that Google account. The Firebase popup
+        // on the frontend was pure UI decoration as far as the backend was
+        // concerned — anyone could skip it entirely and POST
+        // { "email": "victim@example.com" } straight to this route to get back a
+        // valid session cookie FOR THAT USER, no password or Google login
+        // required. Public route (no isAuth), and the earlier signUp endpoint's
+        // "User Already exist" message even makes emails easy to enumerate first.
+        //
+        // The idToken Firebase issues after a real sign-in is a signed JWT that
+        // can be independently verified server-side against Firebase's own public
+        // keys. email/fullName are now read ONLY from that verified token —
+        // never from the request body — so there's no longer anything for a
+        // tampered body to override.
+        let decoded
+        try {
+            decoded = await verifyFirebaseIdToken(idToken)
+        } catch (verifyError) {
+            console.error("Firebase token verification failed:", verifyError.message)
+            return res.status(401).json({ message: "Invalid or expired Google sign-in. Please try again." })
+        }
+
+        if (!decoded.email || !decoded.email_verified) {
+            return res.status(401).json({ message: "Google account email is not verified." })
+        }
+
+        const email = decoded.email
+        const fullName = decoded.name || ""
+
         let user = await User.findOne({ email })
         if (!user) {
             // FIX (rebuilt flow): SignIn.jsx's Google button only ever sends
-            // { email } — no fullName/role at all, since Sign In shouldn't be
-            // collecting new-account info. If we don't even have those, there's
-            // truly no way to create an account here — tell the user to sign up.
+            // { idToken } — no role at all, since Sign In shouldn't be
+            // collecting new-account info. If there's no account for this
+            // (verified) email, there's truly no way to create one here — tell
+            // the user to sign up.
             if (!fullName || !role) {
                 return res.status(400).json({ message: "No account found for this email. Please sign up first." })
             }
-            // NEW: SignUp.jsx's Google button now calls this endpoint immediately
+            // NEW: SignUp.jsx's Google button calls this endpoint immediately
             // after the Google popup succeeds — before asking for mobile, since
             // Google's own OAuth data never includes a phone number. On this first
-            // call we have fullName + role (from Google + the page's role picker)
-            // but not mobile yet. Instead of failing, tell the frontend exactly
-            // what's still needed so it can show a quick follow-up step, rather
-            // than blocking the whole Google popup behind a pre-filled form field.
+            // call we have fullName (from the verified token) + role (from the
+            // page's role picker) but not mobile yet. Instead of failing, tell the
+            // frontend exactly what's still needed so it can show a quick follow-up
+            // step, rather than blocking the whole Google popup behind a pre-filled
+            // form field.
             if (!mobile) {
                 return res.status(200).json({ needsMobile: true, email, fullName })
             }

@@ -1,4 +1,3 @@
-
 import express from "express"
 
 import isAuth from "../middlewares/isAuth.js"
@@ -10,7 +9,9 @@ const itemRouter = express.Router()
 itemRouter.post("/add-item", isAuth, upload.single("image"), addItem)
 itemRouter.post("/edit-item/:itemId", isAuth, upload.single("image"), editItem)
 itemRouter.get("/get-by-id/:itemId", isAuth, getItemById)
-itemRouter.get("/delete/:itemId", isAuth, deleteItem)
+// FIX (CSRF exposure): same class of issue as order.routes.js's accept-order —
+// GET mutating state (permanently deleting a menu item) with no CSRF protection.
+itemRouter.post("/delete/:itemId", isAuth, deleteItem)
 itemRouter.get("/get-by-city/:city", isAuth, getItemByCity)
 itemRouter.get("/get-by-shop/:shopId", isAuth, getItemsByShop)
 itemRouter.get("/search-items", isAuth, searchItems)

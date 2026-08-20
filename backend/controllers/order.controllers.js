@@ -1,3 +1,4 @@
+import mongoose from "mongoose"
 import DeliveryAssignment from "../models/deliveryAssignment.model.js"
 import Order from "../models/order.model.js"
 import Shop from "../models/shop.model.js"
@@ -5,6 +6,8 @@ import User from "../models/user.model.js"
 import Item from "../models/item.model.js"
 import { sendDeliveryOtpMail } from "../utils/mail.js"
 import { dateKey, getStartDate, fillDateSeries } from "../utils/analyticsHelpers.js"
+import bcrypt from "bcryptjs"
+import crypto from "crypto"
 import RazorPay from "razorpay"
 import dotenv from "dotenv"
 import { count } from "console"
@@ -17,8 +20,20 @@ let instance = new RazorPay({
 
 export const placeOrder = async (req, res) => {
     try {
-        const { cartItems, paymentMethod, deliveryAddress, totalAmount, deliveryFee } = req.body
-        if (cartItems.length == 0 || !cartItems) {
+        // FIX (critical — price tampering): `totalAmount` and `deliveryFee` are no
+        // longer read from the request body at all. Previously they were trusted
+        // as-is all the way through to Order.create() AND the amount actually
+        // charged via Razorpay — since these are just numbers a browser sends,
+        // anyone with devtools open could edit the request and pay whatever they
+        // liked, no special tooling required. Both are now computed entirely
+        // server-side, below, from shop-order subtotals that are themselves priced
+        // from the database rather than from the cart.
+        const { cartItems, paymentMethod, deliveryAddress } = req.body
+        // FIX (crash-order bug): `cartItems.length` was checked before `!cartItems`
+        // — if cartItems was ever missing entirely from the body, this threw a
+        // TypeError before the validation meant to catch exactly that case could
+        // run. Order flipped so the existence check runs first.
+        if (!cartItems || cartItems.length == 0) {
             return res.status(400).json({ message: "cart is empty" })
         }
         if (!deliveryAddress.text || !deliveryAddress.latitude || !deliveryAddress.longitude) {
@@ -80,6 +95,13 @@ export const placeOrder = async (req, res) => {
             // it to their cart, and the cart's cached copy has no way to know that.
             const itemIds = items.map(i => i.id)
             const dbItems = await Item.find({ _id: { $in: itemIds } })
+
+            // FIX (critical — price tampering): dbItems used to be fetched ONLY to
+            // check availability, then never touched again — price and name for
+            // every line still came straight from the client-supplied cart below.
+            // This lookup map is what the pricing loop uses instead.
+            const dbItemsById = new Map(dbItems.map(i => [String(i._id), i]))
+
             const unavailable = dbItems.filter(dbItem => !dbItem.isAvailable)
             if (unavailable.length > 0) {
                 const err = new Error(`${unavailable.map(i => i.name).join(", ")} ${unavailable.length > 1 ? "are" : "is"} no longer available`)
@@ -87,24 +109,67 @@ export const placeOrder = async (req, res) => {
                 throw err
             }
 
-            const subtotal = items.reduce((sum, i) => sum + Number(i.price) * Number(i.quantity), 0)
+            // NEW: an item ID the cart claims but the database doesn't have (removed
+            // item, mismatched shop, tampered ID) needs its own explicit rejection —
+            // otherwise it silently drops out of shopOrderItems below while
+            // contributing nothing to subtotal, quietly shorting the order instead
+            // of failing loudly.
+            const missingItem = items.find(i => !dbItemsById.has(String(i.id)))
+            if (missingItem) {
+                const err = new Error("One or more items in your cart are no longer available")
+                err.status = 400
+                throw err
+            }
+
+            let subtotal = 0
+            const shopOrderItems = items.map((i) => {
+                const dbItem = dbItemsById.get(String(i.id))
+
+                // NEW: quantity is the one cart field that's still legitimately
+                // client-driven (it's just "how many the customer wants"), but it
+                // still needs a sanity floor — an unvalidated zero/negative/non-
+                // integer quantity could be used to drag the subtotal down (or
+                // negative) the same way a tampered price could.
+                const quantity = Number(i.quantity)
+                if (!Number.isInteger(quantity) || quantity < 1) {
+                    const err = new Error(`Invalid quantity for ${dbItem.name}`)
+                    err.status = 400
+                    throw err
+                }
+
+                subtotal += dbItem.price * quantity
+
+                return {
+                    item: dbItem._id,
+                    price: dbItem.price,   // FIX: priced from the database, never from cartItems
+                    quantity,
+                    name: dbItem.name      // FIX: named from the database, never from cartItems
+                }
+            })
+
             return {
                 shop: shop._id,
                 owner: shop.owner._id,
                 subtotal,
-                shopOrderItems: items.map((i) => ({
-                    item: i.id,
-                    price: i.price,
-                    quantity: i.quantity,
-                    name: i.name
-                }))
+                shopOrderItems
             }
         }
         ))
 
+        // FIX (critical — price tampering): totalAmount and deliveryFee are now
+        // derived entirely from the server-priced shopOrders above, never from
+        // anything the client sent. The delivery-fee rule mirrors CheckOut.jsx's
+        // display logic (free above ₹500, flat ₹40 otherwise) — kept in one place
+        // here since this is now the value that's actually charged, not just shown.
+        const computedSubtotal = shopOrders.reduce((sum, so) => sum + so.subtotal, 0)
+        const FREE_DELIVERY_THRESHOLD = 500
+        const STANDARD_DELIVERY_FEE = 40
+        const computedDeliveryFee = computedSubtotal > FREE_DELIVERY_THRESHOLD ? 0 : STANDARD_DELIVERY_FEE
+        const computedTotalAmount = computedSubtotal + computedDeliveryFee
+
         if (paymentMethod == "online") {
             const razorOrder = await instance.orders.create({
-                amount: Math.round(totalAmount * 100),
+                amount: Math.round(computedTotalAmount * 100),
                 currency: 'INR',
                 receipt: `receipt_${Date.now()}`
             })
@@ -112,10 +177,8 @@ export const placeOrder = async (req, res) => {
                 user: req.userId,
                 paymentMethod,
                 deliveryAddress,
-                totalAmount,
-                // NEW: persist the delivery fee that was already computed client-side,
-                // so delivery boy earnings can be calculated from real data later
-                deliveryFee: deliveryFee || 0,
+                totalAmount: computedTotalAmount,
+                deliveryFee: computedDeliveryFee,
                 shopOrders,
                 razorpayOrderId: razorOrder.id,
                 payment: false
@@ -132,9 +195,8 @@ export const placeOrder = async (req, res) => {
             user: req.userId,
             paymentMethod,
             deliveryAddress,
-            totalAmount,
-            // NEW: same as above, for the COD path
-            deliveryFee: deliveryFee || 0,
+            totalAmount: computedTotalAmount,
+            deliveryFee: computedDeliveryFee,
             shopOrders
         })
 
@@ -290,7 +352,15 @@ export const updateOrderStatus = async (req, res) => {
     try {
         const { orderId, shopId } = req.params
         const { status } = req.body
+
+        // FIX (crash bug): same ordering issue fixed elsewhere in this file —
+        // `order.shopOrders.find(...)` was called before checking whether `order`
+        // itself was null, so an invalid/nonexistent orderId threw a TypeError here
+        // and fell into the catch block as a 500 instead of a clean 400.
         const order = await Order.findById(orderId)
+        if (!order) {
+            return res.status(400).json({ message: "order not found" })
+        }
 
         const shopOrder = order.shopOrders.find(o => o.shop == shopId)
         if (!shopOrder) {
@@ -309,12 +379,46 @@ export const updateOrderStatus = async (req, res) => {
         if (shopOrder.status === "cancelled") {
             return res.status(400).json({ message: "this order was cancelled by the customer and cannot be updated" })
         }
+
+        // FIX (critical — bypasses the delivery-OTP security model): this endpoint
+        // previously accepted ANY string as `status` and wrote it straight onto the
+        // shopOrder with no whitelist at all. "delivered" is supposed to be
+        // reachable ONLY through verifyDeliveryOtp — which exists specifically to
+        // prove the delivery boy is physically with the customer, who reads the
+        // code aloud from their own email. An owner (or a compromised owner
+        // session) could previously call this route directly with
+        // { status: "delivered" } and mark an order delivered with no OTP, no
+        // delivery boy, no customer confirmation whatsoever — silently defeating
+        // the entire OTP flow we hardened earlier, and letting revenue/analytics
+        // reflect orders that were never actually delivered. Likewise "cancelled"
+        // is meant to be customer-initiated only, via cancelOrderItem. This
+        // endpoint is the owner's status-update tool, so it's now restricted to
+        // exactly the statuses an owner legitimately drives — anything else
+        // (including nonsense values, which previously only surfaced as a raw
+        // Mongoose ValidationError -> generic 500 at order.save()) is rejected
+        // with a clear 400 up front.
+        const OWNER_SETTABLE_STATUSES = ["pending", "preparing", "out of delivery"]
+        if (!OWNER_SETTABLE_STATUSES.includes(status)) {
+            return res.status(400).json({ message: "invalid status. Delivered and cancelled orders are handled through their own dedicated flows." })
+        }
+
         shopOrder.status = status
         let deliveryBoysPayload = []
         if (status == "out of delivery" && !shopOrder.assignment) {
             const { longitude, latitude } = order.deliveryAddress
+            // FIX (stale/offline candidates): this query previously filtered only on
+            // role + proximity — it never checked `isOnline`. A delivery boy's
+            // `location` only updates while their app is open and watchPosition is
+            // actively running (see useUpdateLocation.jsx); the moment they close
+            // the tab, their last coordinates go stale but stay in the database
+            // indefinitely. Without an isOnline check, someone who delivered near
+            // this address yesterday and hasn't opened the app since could still be
+            // selected as a "nearby available" candidate today — eating a broadcast
+            // slot they'll never see, and showing up in deliveryBoysPayload to the
+            // owner as if they were a real live option.
             const nearByDeliveryBoys = await User.find({
                 role: "deliveryBoy",
+                isOnline: true,
                 location: {
                     $near: {
                         $geometry: { type: "Point", coordinates: [Number(longitude), Number(latitude)] },
@@ -368,7 +472,7 @@ export const updateOrderStatus = async (req, res) => {
                     const boySocketId = boy.socketId
                     if (boySocketId) {
                         io.to(boySocketId).emit('newAssignment', {
-                            sentTo:boy._id,
+                            sentTo: boy._id,
                             assignmentId: deliveryAssignment._id,
                             orderId: deliveryAssignment.order._id,
                             shopName: deliveryAssignment.shop.name,
@@ -507,57 +611,136 @@ export const getDeliveryBoyAssignment = async (req, res) => {
 }
 
 
+// FIX (race condition — double-accept): the original version was a classic
+// read-then-write race, twice over:
+//   1. `findById` -> check `status !== "brodcasted"` in JS -> `assignment.save()`.
+//      Two delivery boys hitting this endpoint milliseconds apart could BOTH read
+//      status:"brodcasted", BOTH pass the check, and BOTH get back a 200 "order
+//      accepted" — only the later `save()` actually stuck in the DB, but both
+//      clients believed they had the delivery. Whoever's write lost would still
+//      show up at the shop for an order that's no longer theirs.
+//   2. The "already assigned to another order" check had the exact same shape —
+//      read `alreadyAssigned`, decide in JS, write later. Two concurrent accepts
+//      from the same delivery boy (two tabs, a flaky double-tap) could both pass
+//      that check before either assignment write landed.
+// And separately, the two writes this handler makes — DeliveryAssignment.save()
+// and Order.save() — were not atomic with each other: if the second write failed
+// after the first succeeded, DeliveryAssignment would say "assigned to X" while
+// Order.shopOrders still showed nobody assigned, and the customer's tracking page
+// would silently disagree with the delivery boy's own app.
+//
+// Fixed by:
+//   - Claiming the assignment with ONE atomic conditional write
+//     (findOneAndUpdate matched on status:"brodcasted") instead of read-then-save.
+//     If someone else already claimed it, this matches zero documents and returns
+//     null — that's the actual race-safety, not any check done in JS beforehand.
+//   - Re-checking "already busy elsewhere" AFTER the claim, and rolling the whole
+//     thing back (transaction abort) if they turn out to be busy — no gap between
+//     "read: not busy" and "write: assigned" for a second concurrent request to
+//     slip through.
+//   - Wrapping the claim + busy-check + Order update in one MongoDB transaction,
+//     so it's all-or-nothing: either the assignment is claimed AND the order's
+//     shopOrder is updated together, or neither happens and the assignment reverts
+//     to "brodcasted" for the next delivery boy.
+// Requires a replica-set MongoDB deployment (Atlas — already what this app targets
+// per db.js — provisions this by default; a bare standalone `mongod` does not
+// support transactions).
 export const acceptOrder = async (req, res) => {
+    const { assignmentId } = req.params
+    const session = await mongoose.startSession()
+
+    // Set inside the transaction below; read after it settles to decide the
+    // response. Defaulted to a generic failure so an unexpected error before the
+    // transaction even starts still returns something sane.
+    let outcome = { ok: false, status: 500, message: "accept order error" }
+
     try {
-        const { assignmentId } = req.params
-        const assignment = await DeliveryAssignment.findById(assignmentId)
-        if (!assignment) {
+        // Cheap existence/authorization check done OUTSIDE the transaction, purely
+        // for a clear, specific error message. This is NOT the race-safety
+        // mechanism — a request can still pass this and lose the actual claim
+        // below if someone else grabs it first, which is exactly what the atomic
+        // findOneAndUpdate inside the transaction is for.
+        const preCheck = await DeliveryAssignment.findById(assignmentId)
+        if (!preCheck) {
             return res.status(400).json({ message: "assignment not found" })
         }
-        if (assignment.status !== "brodcasted") {
-            return res.status(400).json({ message: "assignment is expired" })
-        }
-
-        // FIX (Phase 2, #1 — authorization): previously any logged-in user (any role)
-        // could accept ANY delivery assignment just by knowing/guessing its ID — there
-        // was no check that this assignment was actually broadcast to them.
-        // `brodcastedTo` is populated only with nearby users whose role is
-        // "deliveryBoy" (see updateOrderStatus's nearByDeliveryBoys query), so checking
-        // membership in it is sufficient — it also implicitly enforces the role check.
-        const isBroadcastToThisUser = assignment.brodcastedTo.some(id => String(id) === String(req.userId))
+        // FIX (Phase 2, #1 — authorization): `brodcastedTo` is populated only with
+        // nearby users whose role is "deliveryBoy" (see updateOrderStatus's
+        // nearByDeliveryBoys query), so checking membership in it also implicitly
+        // enforces the role check — no separate role lookup needed.
+        const isBroadcastToThisUser = preCheck.brodcastedTo.some(id => String(id) === String(req.userId))
         if (!isBroadcastToThisUser) {
             return res.status(403).json({ message: "this assignment was not offered to you" })
         }
 
-        const alreadyAssigned = await DeliveryAssignment.findOne({
-            assignedTo: req.userId,
-            status: { $nin: ["brodcasted", "completed"] }
-        })
+        try {
+            await session.withTransaction(async () => {
+                // The atomic claim: succeeds only if the assignment is STILL
+                // "brodcasted" at the exact moment of this write. If another
+                // delivery boy's request already flipped it to "assigned", this
+                // matches zero documents and `claimed` comes back null.
+                const claimed = await DeliveryAssignment.findOneAndUpdate(
+                    { _id: assignmentId, status: "brodcasted" },
+                    { status: "assigned", assignedTo: req.userId, acceptedAt: new Date() },
+                    { new: true, session }
+                )
 
-        if (alreadyAssigned) {
-            return res.status(400).json({ message: "You are already assigned to another order" })
+                if (!claimed) {
+                    outcome = { ok: false, status: 400, message: "This order was already accepted by another delivery partner." }
+                    throw new Error("ABORT_ALREADY_TAKEN")
+                }
+
+                const busyElsewhere = await DeliveryAssignment.findOne({
+                    assignedTo: req.userId,
+                    status: { $nin: ["brodcasted", "completed"] },
+                    _id: { $ne: claimed._id }
+                }).session(session)
+
+                if (busyElsewhere) {
+                    outcome = { ok: false, status: 400, message: "You are already assigned to another order" }
+                    // Throwing aborts the transaction — the claim above is rolled
+                    // back too, so the assignment reverts to "brodcasted" instead
+                    // of being stuck "assigned" to someone who can't take it.
+                    throw new Error("ABORT_ALREADY_BUSY")
+                }
+
+                const order = await Order.findById(claimed.order).session(session)
+                if (!order) {
+                    outcome = { ok: false, status: 400, message: "order not found" }
+                    throw new Error("ABORT_ORDER_NOT_FOUND")
+                }
+
+                const shopOrder = order.shopOrders.id(claimed.shopOrderId)
+                if (!shopOrder) {
+                    outcome = { ok: false, status: 400, message: "shop order not found" }
+                    throw new Error("ABORT_SHOPORDER_NOT_FOUND")
+                }
+
+                shopOrder.assignedDeliveryBoy = req.userId
+                await order.save({ session })
+
+                outcome = { ok: true }
+            })
+        } catch (txnError) {
+            // ABORT_* throws above are deliberate control flow — `outcome` already
+            // carries the right status/message for those. Only overwrite it with a
+            // real 500 if this was a genuine, unexpected failure (network blip,
+            // write conflict, etc.) that never got a chance to set `outcome`.
+            if (!String(txnError.message).startsWith("ABORT_")) {
+                console.error("acceptOrder transaction error:", txnError)
+                outcome = { ok: false, status: 500, message: `accept order error ${txnError}` }
+            }
         }
 
-        assignment.assignedTo = req.userId
-        assignment.status = 'assigned'
-        assignment.acceptedAt = new Date()
-        await assignment.save()
-
-        const order = await Order.findById(assignment.order)
-        if (!order) {
-            return res.status(400).json({ message: "order not found" })
+        if (outcome.ok) {
+            return res.status(200).json({ message: 'order accepted' })
         }
+        return res.status(outcome.status).json({ message: outcome.message })
 
-        let shopOrder = order.shopOrders.id(assignment.shopOrderId)
-        shopOrder.assignedDeliveryBoy = req.userId
-        await order.save()
-
-
-        return res.status(200).json({
-            message: 'order accepted'
-        })
     } catch (error) {
         return res.status(500).json({ message: `accept order error ${error}` })
+    } finally {
+        session.endSession()
     }
 }
 
@@ -664,8 +847,14 @@ export const getOrderById = async (req, res) => {
 export const sendDeliveryOtp = async (req, res) => {
     try {
         const { orderId, shopOrderId } = req.body
+
+        // FIX (crash bug): previously did `order.shopOrders.id(...)` BEFORE checking
+        // whether `order` itself was null — an invalid/nonexistent orderId threw a
+        // TypeError here that fell into the catch block as a 500, instead of the
+        // clean 400 the `!order` check below was clearly meant to return. Optional
+        // chaining fixes the ordering issue without changing the check's intent.
         const order = await Order.findById(orderId).populate("user")
-        const shopOrder = order.shopOrders.id(shopOrderId)
+        const shopOrder = order?.shopOrders?.id(shopOrderId)
         if (!order || !shopOrder) {
             return res.status(400).json({ message: "enter valid order/shopOrderid" })
         }
@@ -681,9 +870,18 @@ export const sendDeliveryOtp = async (req, res) => {
             return res.status(403).json({ message: "you are not assigned to this delivery" })
         }
 
-        const otp = Math.floor(1000 + Math.random() * 9000).toString()
-        shopOrder.deliveryOtp = otp
+        // FIX (delivery OTP hardening): crypto.randomInt instead of Math.random —
+        // same reasoning as the earlier checkout-OTP fix, Math.random is not
+        // cryptographically secure. The OTP itself is now hashed before it's
+        // stored (deliveryOtpHash), never kept in plaintext — see order.model.js.
+        const otp = crypto.randomInt(1000, 10000).toString()
+        const otpHash = await bcrypt.hash(otp, 10)
+
+        shopOrder.deliveryOtpHash = otpHash
         shopOrder.otpExpires = Date.now() + 5 * 60 * 1000
+        // Reset the wrong-attempt counter every time a fresh OTP is generated —
+        // mirrors User.mobileOtpAttempts.
+        shopOrder.deliveryOtpAttempts = 0
         await order.save()
         await sendDeliveryOtpMail(order.user, otp)
         return res.status(200).json({ message: `Otp sent Successfuly to ${order?.user?.fullName}` })
@@ -695,8 +893,17 @@ export const sendDeliveryOtp = async (req, res) => {
 export const verifyDeliveryOtp = async (req, res) => {
     try {
         const { orderId, shopOrderId, otp } = req.body
-        const order = await Order.findById(orderId).populate("user")
-        const shopOrder = order.shopOrders.id(shopOrderId)
+
+        // FIX (delivery OTP hardening): deliveryOtpHash/otpExpires/deliveryOtpAttempts
+        // are `select: false` on the schema now (see order.model.js) so they don't
+        // leak in normal responses — this is the one place that legitimately needs
+        // to read them, so it opts back in explicitly.
+        const order = await Order.findById(orderId)
+            .select('+shopOrders.deliveryOtpHash +shopOrders.otpExpires +shopOrders.deliveryOtpAttempts')
+            .populate("user")
+        // FIX (crash bug): same ordering issue as sendDeliveryOtp — checking `order`
+        // before dereferencing it instead of after.
+        const shopOrder = order?.shopOrders?.id(shopOrderId)
         if (!order || !shopOrder) {
             return res.status(400).json({ message: "enter valid order/shopOrderid" })
         }
@@ -710,12 +917,41 @@ export const verifyDeliveryOtp = async (req, res) => {
             return res.status(403).json({ message: "you are not assigned to this delivery" })
         }
 
-        if (shopOrder.deliveryOtp !== otp || !shopOrder.otpExpires || shopOrder.otpExpires < Date.now()) {
+        if (!shopOrder.deliveryOtpHash || !shopOrder.otpExpires) {
+            return res.status(400).json({ message: "Please request an OTP first." })
+        }
+
+        if (shopOrder.otpExpires < Date.now()) {
+            return res.status(400).json({ message: "OTP expired. Please request a new OTP." })
+        }
+
+        // FIX (brute-force guard): the original comparison had NO attempt limit at
+        // all. A 4-digit OTP (9000 possibilities) valid for 5 minutes, with unlimited
+        // guesses and no rate limiting, is brute-forceable by a simple script well
+        // within that window. Mirrors User.mobileOtpAttempts: 5 wrong attempts
+        // against the current OTP locks it out until a fresh one is requested.
+        if (shopOrder.deliveryOtpAttempts >= 5) {
+            return res.status(429).json({ message: "Too many incorrect attempts. Please request a new OTP." })
+        }
+
+        if (!otp) {
+            return res.status(400).json({ message: "otp is required" })
+        }
+
+        const isMatch = await bcrypt.compare(otp, shopOrder.deliveryOtpHash)
+        if (!isMatch) {
+            shopOrder.deliveryOtpAttempts += 1
+            await order.save()
             return res.status(400).json({ message: "Invalid/Expired Otp" })
         }
 
         shopOrder.status = "delivered"
         shopOrder.deliveredAt = Date.now()
+        // Clear the OTP material now that it's served its purpose — defense in
+        // depth alongside select:false, same as verifyCheckoutOtp does for User.
+        shopOrder.deliveryOtpHash = null
+        shopOrder.otpExpires = null
+        shopOrder.deliveryOtpAttempts = 0
         await order.save()
         await DeliveryAssignment.deleteOne({
             shopOrderId: shopOrder._id,

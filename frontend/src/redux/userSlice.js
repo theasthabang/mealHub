@@ -128,6 +128,24 @@ const userSlice = createSlice({
     },
     setSearchItems: (state, action) => {
       state.searchItems = action.payload
+    },
+    // NEW: persists a star rating into myOrders locally right after the rating
+    // endpoint succeeds, so the stars stay filled without waiting for a refetch —
+    // mirrors the array-shaped lookup updateRealtimeOrderStatus above already uses
+    // for the customer's myOrders (shopOrders stays a full array here, since one
+    // order can span multiple shops).
+    setItemRating: (state, action) => {
+      const { orderId, shopId, itemId, rating } = action.payload
+      const order = state.myOrders.find(o => o._id == orderId)
+      if (order) {
+        const shopOrder = order.shopOrders.find(so => so.shop._id == shopId)
+        if (shopOrder) {
+          const shopOrderItem = shopOrder.shopOrderItems.find(i => i.item._id == itemId)
+          if (shopOrderItem) {
+            shopOrderItem.userRating = rating
+          }
+        }
+      }
     }
   }
 })
@@ -136,6 +154,6 @@ export const {
   setUserData, setCurrentAddress, setCurrentCity, setCurrentState, setShopsInMyCity,
   setItemsInMyCity, addToCart, updateQuantity, removeCartItem, setMyOrders, setMyOrdersLoading, addMyOrder,
   updateOrderStatus, setSearchItems, setTotalAmount, setSocket, updateRealtimeOrderStatus,
-  cancelOrderStatus
+  cancelOrderStatus, setItemRating
 } = userSlice.actions
 export default userSlice.reducer

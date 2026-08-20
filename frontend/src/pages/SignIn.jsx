@@ -47,8 +47,16 @@ function SignIn() {
         try {
             const provider = new GoogleAuthProvider()
             const result = await signInWithPopup(auth, provider)
+            // FIX (critical — account takeover): previously sent `{ email: result.user.email }`
+            // — just a string the backend trusted at face value with no proof it
+            // came from an actual Google sign-in. The ID token below is a signed
+            // JWT the backend independently verifies with Firebase Admin before
+            // trusting anything about who signed in; sending the raw email
+            // alongside it would be redundant (and worse, would tempt a future
+            // edit to read from the untrusted field again), so it's dropped here.
+            const idToken = await result.user.getIdToken()
             const { data } = await axios.post(`${serverUrl}/api/auth/google-auth`, {
-                email: result.user.email,
+                idToken,
             }, { withCredentials: true })
             dispatch(setUserData(data))
         } catch (error) {
@@ -65,7 +73,7 @@ function SignIn() {
             <div className={`bg-white rounded-xl shadow-lg w-full max-w-md p-8 border-[1px] `} style={{
                 border: `1px solid ${borderColor}`
             }}>
-                <h1 className={`text-3xl font-bold mb-2 `} style={{ color: primaryColor }}>Vingo</h1>
+                <h1 className={`text-3xl font-bold mb-2 `} style={{ color: primaryColor }}>MealHub</h1>
                 <p className='text-gray-600 mb-8'> Sign In to your account to get started with delicious food deliveries
                 </p>
 

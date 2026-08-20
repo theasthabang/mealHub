@@ -84,7 +84,9 @@ function DeliveryBoy() {
 
   const acceptOrder = async (assignmentId) => {
     try {
-      await axios.get(`${serverUrl}/api/order/accept-order/${assignmentId}`, { withCredentials: true })
+      // FIX: route is now POST (see order.routes.js) — was GET, which mutates
+      // state with no CSRF protection.
+      await axios.post(`${serverUrl}/api/order/accept-order/${assignmentId}`, {}, { withCredentials: true })
       toast.success("Order accepted!")
       await getCurrentOrder()
     } catch (error) {

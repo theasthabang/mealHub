@@ -8,7 +8,19 @@ const shopOrderItemSchema = new mongoose.Schema({
     },
     name:String,
     price:Number,
-    quantity:Number
+    quantity:Number,
+    // NEW: persists the customer's own star rating for THIS specific order line.
+    // Item.rating.average/count (in item.model.js) is only an aggregate — it has
+    // no way to answer "did this user already rate this delivery," which is why
+    // the UI previously had to hold selected stars in local component state and
+    // lost them on every remount/refetch. This is the actual source of truth the
+    // frontend now reads from instead.
+    userRating: {
+        type: Number,
+        min: 1,
+        max: 5,
+        default: null
+    }
 }, { timestamps: true })
 
 const shopOrderSchema = new mongoose.Schema({

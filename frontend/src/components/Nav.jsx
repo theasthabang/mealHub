@@ -63,7 +63,7 @@ function Nav() {
                 </div>
             )}
 
-            <h1 className='text-3xl font-bold mb-2 text-[#ff4d2d]'>Vingo</h1>
+            <h1 className='text-3xl font-bold mb-2 text-[#ff4d2d]'>MealHub</h1>
 
             {/* FIX (navbar layout): location was previously stacked in its own line
                 ABOVE the search bar (flex-col), inside a fixed-height 80px navbar.
@@ -127,13 +127,50 @@ function Nav() {
                     <div className='w-[40px] h-[40px] rounded-full flex items-center justify-center bg-[#ff4d2d] text-white text-[18px] shadow-xl font-semibold cursor-pointer' onClick={() => setShowInfo(prev => !prev)}>
                         {userData?.fullName.slice(0, 1)}
                     </div>
-                    {showInfo && <div className={`fixed top-[80px] right-[10px] 
-                    ${userData.role == "deliveryBoy" ? "md:right-[20%] lg:right-[40%]" : "md:right-[10%] lg:right-[25%]"} w-[180px] bg-white/90 backdrop-blur-md shadow-2xl rounded-xl p-[20px] flex flex-col gap-[10px] z-[9999] border border-white/60`}>
-                        <div className='text-[17px] font-semibold'>{userData.fullName}</div>
-                        {userData.role == "user" && <div className='md:hidden text-[#ff4d2d] font-semibold cursor-pointer' onClick={() => navigate("/my-orders")}>My Orders</div>}
-
-                        <div className='text-[#ff4d2d] font-semibold cursor-pointer' onClick={handleLogOut}>Log Out</div>
-                    </div>}
+                    {/* FIX (dropdown placement): was `fixed top-[80px] right-[10px]` with
+                        extra `md:right-[10%] lg:right-[25%]` (or `20%`/`40%` for delivery
+                        boys) percentage offsets guessed per breakpoint. Those percentages
+                        are relative to the VIEWPORT width, not to the avatar's actual x
+                        position, so at any window width between breakpoints the panel
+                        drifted away from the avatar that opened it — the misaligned,
+                        floating-off-to-the-side placement seen in testing. Switched to
+                        `absolute top-full right-0`, positioned relative to THIS wrapper
+                        (which already wraps the avatar too, per the click-outside ref
+                        above) — the dropdown is now always anchored directly under the
+                        avatar, at any width, with no magic numbers to maintain per role.
+                        Styling pass alongside it: an avatar+name header row (ties the
+                        panel visually back to who's logged in), a divider, and real
+                        hover states instead of bare colored text. */}
+                    {showInfo && (
+                        <div className='absolute top-full right-0 mt-3 w-[220px] bg-white/95 backdrop-blur-md shadow-2xl rounded-xl overflow-hidden z-[9999] border border-white/60'>
+                            <div className='flex items-center gap-3 px-4 py-3'>
+                                <div className='w-9 h-9 flex-shrink-0 rounded-full flex items-center justify-center bg-[#ff4d2d] text-white text-sm font-semibold'>
+                                    {userData?.fullName.slice(0, 1)}
+                                </div>
+                                <div className='min-w-0'>
+                                    <div className='text-sm font-semibold text-gray-900 truncate'>{userData.fullName}</div>
+                                    <div className='text-xs text-gray-400 capitalize'>{userData.role === "deliveryBoy" ? "Delivery Partner" : userData.role}</div>
+                                </div>
+                            </div>
+                            <div className='h-px bg-gray-100' />
+                            <div className='py-1'>
+                                {userData.role == "user" && (
+                                    <button
+                                        className='w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-orange-50 hover:text-[#ff4d2d] transition-colors md:hidden'
+                                        onClick={() => { setShowInfo(false); navigate("/my-orders") }}
+                                    >
+                                        My Orders
+                                    </button>
+                                )}
+                                <button
+                                    className='w-full text-left px-4 py-2.5 text-sm font-medium text-[#ff4d2d] hover:bg-orange-50 transition-colors'
+                                    onClick={handleLogOut}
+                                >
+                                    Log Out
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
             </div>
