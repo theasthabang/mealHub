@@ -11,10 +11,12 @@ import { FaPlus } from "react-icons/fa6";
 import { TbReceipt2 } from "react-icons/tb";
 import { useNavigate } from 'react-router-dom';
 import SearchDropdown from './SearchDropdown';
+import toast from 'react-hot-toast'
+import { incrementNewOrderCount, resetNewOrderCount } from '../redux/ownerSlice';
 
 function Nav() {
-    const { userData, currentCity, cartItems } = useSelector(state => state.user)
-    const { myShopData } = useSelector(state => state.owner)
+    const { userData, currentCity, cartItems, socket } = useSelector(state => state.user)
+    const { myShopData, newOrderCount } = useSelector(state => state.owner)
     const [showInfo, setShowInfo] = useState(false)
     const [showSearch, setShowSearch] = useState(false)
     const dispatch = useDispatch()
@@ -33,6 +35,32 @@ function Nav() {
         document.addEventListener('mousedown', handleClickOutside)
         return () => document.removeEventListener('mousedown', handleClickOutside)
     }, [])
+
+    // NEW: real-time "new order" notification for the owner, wherever they happen
+    // to be in the app — not just the My Orders page. Previously this listener
+    // only existed inside MyOrders.jsx, so an owner sitting on the dashboard (or
+    // add-item, or anywhere else) got no notification at all until they happened
+    // to navigate to My Orders. Nav is the one component rendered on every owner
+    // dashboard page, so the listener lives here instead. Ownership check mirrors
+    // the one already used in MyOrders.jsx — this event is broadcast to the shop's
+    // own socket only (see placeOrder in order.controllers.js), so the check here
+    // is a defensive match rather than the real security boundary, same as there.
+    useEffect(() => {
+        if (!socket || userData.role !== "owner") return
+
+        const handleNewOrder = (data) => {
+            if (data.shopOrders?.owner._id == userData._id) {
+                dispatch(incrementNewOrderCount())
+                toast.success(
+                    `New order from ${data.deliveryAddress?.text || "a customer"}!`,
+                    { icon: '📦', duration: 6000 }
+                )
+            }
+        }
+
+        socket.on('newOrder', handleNewOrder)
+        return () => socket.off('newOrder', handleNewOrder)
+    }, [socket, userData])
 
     const handleLogOut = async () => {
         try {
@@ -99,12 +127,27 @@ function Nav() {
                             <FaPlus size={20} />
                         </button></>}
 
-                    <div className='hidden md:flex items-center gap-2 cursor-pointer relative px-3 py-1 rounded-lg bg-[#ff4d2d]/10 text-[#ff4d2d] font-medium' onClick={() => navigate("/my-orders")}>
+                    {/* NEW: badge shows how many new orders have come in since the
+                        owner last opened My Orders — same visual pattern as the
+                        customer's cart-count badge below, for consistency. Clicking
+                        through clears it, since "unseen" only matters until they've
+                        actually looked at the list. */}
+                    <div className='hidden md:flex items-center gap-2 cursor-pointer relative px-3 py-1 rounded-lg bg-[#ff4d2d]/10 text-[#ff4d2d] font-medium' onClick={() => { dispatch(resetNewOrderCount()); navigate("/my-orders") }}>
                         <TbReceipt2 size={20} />
                         <span>My Orders</span>
+                        {newOrderCount > 0 && (
+                            <span className='absolute -right-2 -top-2 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-[#ff4d2d] text-white text-[11px] font-semibold leading-none'>
+                                {newOrderCount}
+                            </span>
+                        )}
                     </div>
-                    <div className='md:hidden flex items-center gap-2 cursor-pointer relative px-3 py-1 rounded-lg bg-[#ff4d2d]/10 text-[#ff4d2d] font-medium' onClick={() => navigate("/my-orders")}>
+                    <div className='md:hidden flex items-center gap-2 cursor-pointer relative px-3 py-1 rounded-lg bg-[#ff4d2d]/10 text-[#ff4d2d] font-medium' onClick={() => { dispatch(resetNewOrderCount()); navigate("/my-orders") }}>
                         <TbReceipt2 size={20} />
+                        {newOrderCount > 0 && (
+                            <span className='absolute -right-2 -top-2 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-[#ff4d2d] text-white text-[11px] font-semibold leading-none'>
+                                {newOrderCount}
+                            </span>
+                        )}
                     </div>
                 </> : (
                     <>

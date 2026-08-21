@@ -5,6 +5,7 @@ import axios from 'axios'
 import { serverUrl } from '../App'
 import { useEffect } from 'react'
 import { useState } from 'react'
+import { useRef } from 'react'
 import DeliveryBoyTracking from './DeliveryBoyTracking'
 import { ClipLoader } from 'react-spinners'
 import toast from 'react-hot-toast'
@@ -22,6 +23,15 @@ function DeliveryBoy() {
   const [deliveryBoyLocation, setDeliveryBoyLocation] = useState(null)
   const [loading, setLoading] = useState(false)
 
+  // NEW (room-scoped location broadcasting): a ref, not state, because the
+  // watchPosition callback below is set up once per socket/role change (see its
+  // dependency array) and reads whatever the LATEST current order is at the
+  // moment each GPS position comes in — a ref lets that happen without tearing
+  // down and re-subscribing the geolocation watch every time currentOrder
+  // changes, which would be wasteful and could cause missed position updates
+  // mid-resubscribe.
+  const currentOrderIdRef = useRef(null)
+
   // FIX (broken/incomplete function call): the original watchPosition call had its
   // success callback, error callback, and options object separated by commas OUTSIDE
   // the function call — `watchPosition((pos)=>{...}), (error)=>{...}, {enableHighAccuracy:true}`.
@@ -37,10 +47,19 @@ function DeliveryBoy() {
           const latitude = position.coords.latitude
           const longitude = position.coords.longitude
           setDeliveryBoyLocation({ lat: latitude, lon: longitude })
+          // FIX (privacy leak — location broadcast to everyone): orderId is new
+          // here — the server (see socket.js) now only re-broadcasts this
+          // position into a room scoped to that specific order, after verifying
+          // this delivery boy is actually assigned to it. Without an orderId the
+          // server won't broadcast at all, so this is required, not optional.
+          // `userId` is kept in the payload for backward compatibility but is no
+          // longer read server-side (socket.userId, from the verified JWT
+          // handshake, is used instead).
           socket.emit('updateLocation', {
             latitude,
             longitude,
-            userId: userData._id
+            userId: userData._id,
+            orderId: currentOrderIdRef.current
           })
         },
         (error) => {
@@ -77,6 +96,10 @@ function DeliveryBoy() {
     try {
       const result = await axios.get(`${serverUrl}/api/order/get-current-order`, { withCredentials: true })
       setCurrentOrder(result.data)
+      // Keep the ref used by the watchPosition callback in sync — this is the
+      // one place currentOrder's underlying id actually changes (a fresh
+      // delivery picked up, or null once there's no active order left).
+      currentOrderIdRef.current = result.data?._id || null
     } catch (error) {
       console.log(error)
     }
@@ -96,13 +119,23 @@ function DeliveryBoy() {
 
   // NEW (real-time toast): a fresh delivery assignment just came in over the socket —
   // surface it immediately instead of relying on the delivery boy noticing the list update
+  //
+  // FIX (crash on mount): was `socket.on(...)` / `socket.off(...)` with no optional
+  // chaining — socket starts as `null` in Redux and is only set once App.jsx's own
+  // effect creates the connection. React runs a child component's effects before
+  // its parent's within the same commit, so this effect could run with socket
+  // still null before App.jsx had a chance to set it, throwing
+  // "Cannot read properties of null (reading 'on')" on essentially every fresh
+  // page load for a delivery boy. Every other socket listener in this app
+  // (MyOrders.jsx, TrackOrderPage.jsx) already used `socket?.on(...)` — this one
+  // just hadn't been brought in line with that pattern yet.
   useEffect(() => {
-    socket.on('newAssignment', (data) => {
+    socket?.on('newAssignment', (data) => {
       setAvailableAssignments(prev => ([...prev, data]))
       toast.success(`New order available: ${data.shopName}`)
     })
     return () => {
-      socket.off('newAssignment')
+      socket?.off('newAssignment')
     }
   }, [socket])
 

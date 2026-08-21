@@ -7,6 +7,7 @@ import toast from 'react-hot-toast'
 import UserOrderCard from '../components/UserOrderCard';
 import OwnerOrderCard from '../components/OwnerOrderCard';
 import { setMyOrders, updateOrderStatus, updateRealtimeOrderStatus } from '../redux/userSlice';
+import { resetNewOrderCount } from '../redux/ownerSlice';
 
 function MyOrders() {
   const { userData, myOrders, myOrdersLoading, socket } = useSelector(state => state.user)
@@ -19,6 +20,10 @@ function MyOrders() {
     socket?.on('newOrder', (data) => {
       if (data.shopOrders?.owner._id == userData._id) {
         dispatch(setMyOrders([data, ...myOrders]))
+        // Owner is already looking at the order list right now, so there's
+        // nothing "unseen" about this one — keeps Nav.jsx's badge count from
+        // ticking up while they're already on this exact page.
+        dispatch(resetNewOrderCount())
         toast.success("New order received!")
       }
     })

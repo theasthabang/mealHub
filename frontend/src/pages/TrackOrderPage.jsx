@@ -46,6 +46,20 @@ function TrackOrderPage() {
         }
     }, [socket])
 
+    // NEW (privacy leak fix): location updates for this order only reach clients
+    // who've explicitly joined its room — see socket.js's 'trackOrder' handler,
+    // which independently re-checks (via the database) that this user is actually
+    // allowed to see this order before letting the join succeed. Leaving the room
+    // on unmount means navigating away stops this tab from receiving further
+    // updates for an order it's no longer displaying.
+    useEffect(() => {
+        if (!socket || !orderId) return
+        socket.emit('trackOrder', { orderId })
+        return () => {
+            socket.emit('stopTrackingOrder', { orderId })
+        }
+    }, [socket, orderId])
+
     useEffect(() => {
         handleGetOrder()
     }, [orderId])

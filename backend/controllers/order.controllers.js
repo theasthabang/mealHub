@@ -310,8 +310,13 @@ export const verifyPayment = async (req, res) => {
 export const getMyOrders = async (req, res) => {
     try {
         const user = await User.findById(req.userId)
+        // FIX (delivery OTP hardening): explicit exclusion of the OTP fields on
+        // every order returned here — this is the actual privacy boundary now
+        // (see order.model.js for why relying on schema-level select:false was
+        // unreliable for these particular fields).
         if (user.role == "user") {
             const orders = await Order.find({ user: req.userId })
+                .select('-shopOrders.deliveryOtpHash -shopOrders.otpExpires -shopOrders.deliveryOtpAttempts')
                 .sort({ createdAt: -1 })
                 .populate("shopOrders.shop", "name")
                 .populate("shopOrders.owner", "name email mobile")
@@ -320,6 +325,7 @@ export const getMyOrders = async (req, res) => {
             return res.status(200).json(orders)
         } else if (user.role == "owner") {
             const orders = await Order.find({ "shopOrders.owner": req.userId })
+                .select('-shopOrders.deliveryOtpHash -shopOrders.otpExpires -shopOrders.deliveryOtpAttempts')
                 .sort({ createdAt: -1 })
                 .populate("shopOrders.shop", "name")
                 .populate("user")
@@ -756,6 +762,7 @@ export const getCurrentOrder = async (req, res) => {
             .populate("assignedTo", "fullName email mobile location")
             .populate({
                 path: "order",
+                select: '-shopOrders.deliveryOtpHash -shopOrders.otpExpires -shopOrders.deliveryOtpAttempts',
                 populate: [{ path: "user", select: "fullName email location mobile" }]
 
             })
@@ -806,6 +813,7 @@ export const getOrderById = async (req, res) => {
     try {
         const { orderId } = req.params
         const order = await Order.findById(orderId)
+            .select('-shopOrders.deliveryOtpHash -shopOrders.otpExpires -shopOrders.deliveryOtpAttempts')
             .populate("user")
             .populate({
                 path: "shopOrders.shop",
@@ -894,12 +902,11 @@ export const verifyDeliveryOtp = async (req, res) => {
     try {
         const { orderId, shopOrderId, otp } = req.body
 
-        // FIX (delivery OTP hardening): deliveryOtpHash/otpExpires/deliveryOtpAttempts
-        // are `select: false` on the schema now (see order.model.js) so they don't
-        // leak in normal responses — this is the one place that legitimately needs
-        // to read them, so it opts back in explicitly.
+        // FIX (delivery OTP hardening — regression fix): the schema no longer
+        // marks these fields `select: false` (see order.model.js for why that
+        // approach was unreliable), so a plain findById returns them normally —
+        // no special select() needed here anymore.
         const order = await Order.findById(orderId)
-            .select('+shopOrders.deliveryOtpHash +shopOrders.otpExpires +shopOrders.deliveryOtpAttempts')
             .populate("user")
         // FIX (crash bug): same ordering issue as sendDeliveryOtp — checking `order`
         // before dereferencing it instead of after.

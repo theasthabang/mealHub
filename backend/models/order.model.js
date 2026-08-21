@@ -51,13 +51,31 @@ const shopOrderSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
   },
-deliveryOtp:{
+// FIX (delivery OTP hardening): renamed deliveryOtp -> deliveryOtpHash — the OTP
+// is stored as a bcrypt hash, never in plaintext. Added deliveryOtpAttempts as a
+// wrong-guess counter (mirrors User.mobileOtpAttempts), reset every time a fresh
+// OTP is generated. NOTE: deliberately NOT using `select: false` here (an earlier
+// version of this fix did, and it turned out to be unreliable for a field inside
+// a subdocument that's used in an array like shopOrders — Mongoose's `.select('+shopOrders.field')`
+// opt-in doesn't consistently re-include it, which silently broke OTP
+// verification: sendDeliveryOtp appeared to succeed but the value was never
+// actually readable back). Instead, these fields are included by default like
+// any other field, and are explicitly EXCLUDED via `.select('-shopOrders.deliveryOtpHash ...')`
+// on the specific read endpoints that return orders to end users (getMyOrders,
+// getCurrentOrder, getOrderById in order.controllers.js) — dot-notation
+// EXCLUSION on array-of-subdocument fields is the well-supported direction in
+// both MongoDB and Mongoose, unlike the inclusion-override direction.
+deliveryOtpHash:{
         type:String,
         default:null
     },
 otpExpires:{
         type:Date,
         default:null
+    },
+deliveryOtpAttempts:{
+        type:Number,
+        default:0
     },
 deliveredAt:{
     type:Date,
