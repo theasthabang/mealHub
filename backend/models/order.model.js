@@ -89,6 +89,24 @@ cancelledAt:{
 cancelReason:{
     type:String,
     default:null
+},
+// NEW: refund display summary. The real, authoritative refund record —
+// with row-locking to prevent double-refunds, the full audit trail, and
+// the actual Razorpay refund ID — lives in Postgres (see payments_refunds_schema.sql).
+// These two fields are deliberately just a lightweight COPY, written once
+// by cancelOrderItem right after the real refund succeeds, so the
+// customer's order list can show "refund processed" on every page load
+// without forcing every single getMyOrders call to also query Postgres —
+// a hot, frequently-hit read path shouldn't need a cross-database round
+// trip just to display something that's already been decided and recorded
+// elsewhere.
+refundAmount:{
+    type:Number,
+    default:null
+},
+refundStatus:{
+    type:String,
+    default:null
 }
 
 }, { timestamps: true })

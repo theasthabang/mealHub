@@ -60,9 +60,25 @@ function UserOrderCard({ data }) {
         if (!cancelReason) return
         setCancelling(true)
         try {
-            await axios.post(`${serverUrl}/api/order/cancel/${data._id}/${shopId}`, { reason: cancelReason }, { withCredentials: true })
-            dispatch(cancelOrderStatus({ orderId: data._id, shopId, cancelReason }))
-            toast.success("Order cancelled")
+            const result = await axios.post(`${serverUrl}/api/order/cancel/${data._id}/${shopId}`, { reason: cancelReason }, { withCredentials: true })
+
+            // NEW: refund info now flows all the way through — persisted in
+            // Redux (so it survives beyond this one toast) and used to make
+            // the confirmation message explicit rather than vague.
+            dispatch(cancelOrderStatus({
+                orderId: data._id,
+                shopId,
+                cancelReason,
+                refundAmount: result.data.refund?.amount,
+                refundStatus: result.data.refund?.status
+            }))
+
+            if (result.data.refund) {
+                toast.success(`Refund of ₹${result.data.refund.amount} was successful!`)
+            } else {
+                toast.success(result.data.message || "Order cancelled")
+            }
+
             setCancellingShopOrderId(null)
             setCancelReason("")
         } catch (error) {
@@ -78,6 +94,17 @@ function UserOrderCard({ data }) {
         return "text-blue-600"
     }
 
+    // FIX (multi-shop order): the header used to always show
+    // data.shopOrders[0].status — for an order spanning multiple shops at
+    // different stages (one delivered, one still preparing), that silently
+    // implied a single status applied to the whole order. Shows the shared
+    // status only when every shop genuinely agrees on it; otherwise "Mixed" —
+    // the per-shop breakdown further down in this card already shows each
+    // one individually, so this header stays an honest quick summary rather
+    // than misleading detail.
+    const distinctStatuses = new Set(data.shopOrders?.map(so => so.status))
+    const overallStatus = distinctStatuses.size === 1 ? data.shopOrders?.[0]?.status : "mixed"
+
     return (
         <div className='bg-white rounded-lg shadow p-4 space-y-4'>
             <div className='flex justify-between border-b pb-2'>
@@ -90,8 +117,19 @@ function UserOrderCard({ data }) {
                     </p>
                 </div>
                 <div className='text-right'>
-                    {data.paymentMethod == "cod" ? <p className='text-sm text-gray-500'>{data.paymentMethod?.toUpperCase()}</p> : <p className='text-sm text-gray-500 font-semibold'>Payment: {data.payment ? "true" : "false"}</p>}
-                    <p className={`font-medium ${statusColor(data.shopOrders?.[0].status)}`}>{data.shopOrders?.[0].status}</p>
+                    {/* FIX (unclear UI): previously showed "Payment: true/false" for
+                        online orders — a raw boolean that doesn't tell the customer
+                        WHICH payment method was used, only whether it succeeded. Now
+                        shows the method plainly ("Online"/"Cash on Delivery") and, for
+                        online orders, whether the payment actually went through, since
+                        that's the piece that actually matters to a customer glancing
+                        at their order list. */}
+                    {data.paymentMethod == "cod"
+                        ? <p className='text-sm text-gray-500 font-medium'>Cash on Delivery</p>
+                        : <p className={`text-sm font-semibold ${data.payment ? 'text-green-600' : 'text-amber-600'}`}>
+                            Online • {data.payment ? "Paid" : "Payment Pending"}
+                        </p>}
+                    <p className={`font-medium ${statusColor(overallStatus)}`}>{overallStatus === "mixed" ? "Mixed" : overallStatus}</p>
                 </div>
             </div>
 
@@ -163,6 +201,16 @@ function UserOrderCard({ data }) {
 
                     {shopOrder.status == "cancelled" && shopOrder.cancelReason && (
                         <p className='text-xs text-gray-500'>Reason: {shopOrder.cancelReason}</p>
+                    )}
+                    {/* NEW: persistent refund confirmation — this is what makes
+                        the refund trackable/checkable anytime, not just a toast
+                        that disappears after a few seconds. Only shown when a
+                        real refund actually happened (COD/unpaid cancellations
+                        have no refundAmount, so this stays hidden for those). */}
+                    {shopOrder.status == "cancelled" && shopOrder.refundAmount && (
+                        <p className='text-xs font-medium text-green-600 mt-1'>
+                            ✓ Refund of ₹{shopOrder.refundAmount} processed successfully
+                        </p>
                     )}
                 </div>
             ))}

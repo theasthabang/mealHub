@@ -11,6 +11,10 @@ import crypto from "crypto"
 import RazorPay from "razorpay"
 import dotenv from "dotenv"
 import { count } from "console"
+import pgPool from "../utils/postgres.js"
+import PaymentOutbox from "../models/paymentOutbox.model.js"
+import { publishOutboxEntry } from "../utils/outboxPublisher.js"
+import logger from "../utils/logger.js"
 
 dotenv.config()
 let instance = new RazorPay({
@@ -269,9 +273,56 @@ export const verifyPayment = async (req, res) => {
             return res.status(403).json({ message: "not authorized for this order" })
         }
 
-        order.payment = true
-        order.razorpayPaymentId = razorpay_payment_id
-        await order.save()
+        // FIX (Outbox Pattern — replaces the previous direct try/catch write):
+        // the old version updated MongoDB, THEN separately tried writing to
+        // Postgres in a try/catch that just logged and moved on if it failed —
+        // meaning a Postgres hiccup at exactly the wrong moment could leave a
+        // genuinely-paid order with no ledger record at all, silently.
+        //
+        // Now: the order update and a durable "this Postgres write is owed"
+        // outbox entry are written together, atomically, in a single MongoDB
+        // transaction — both are in MongoDB, so this genuinely is atomic,
+        // unlike trying to span MongoDB and Postgres directly. If this
+        // transaction commits, the outbox entry is GUARANTEED to exist — no
+        // window where the order is marked paid but nothing recorded that a
+        // Postgres write is still owed.
+        const session = await mongoose.startSession()
+        let outboxEntry
+        try {
+            session.startTransaction()
+
+            order.payment = true
+            order.razorpayPaymentId = razorpay_payment_id
+            await order.save({ session })
+
+            const created = await PaymentOutbox.create([{
+                mongoOrderId: order._id,
+                razorpayPaymentId: razorpay_payment_id,
+                razorpayOrderId: order.razorpayOrderId,
+                amount: order.totalAmount,
+                currency: "INR",
+                status: "pending"
+            }], { session })
+            outboxEntry = created[0]
+
+            await session.commitTransaction()
+        } catch (txError) {
+            await session.abortTransaction()
+            logger.error({ err: txError, orderId: order._id }, "Failed to atomically record payment + outbox entry")
+            return res.status(500).json({ message: "Payment verification failed while saving — please contact support before retrying payment." })
+        } finally {
+            session.endSession()
+        }
+
+        // Eager attempt: try publishing to Postgres RIGHT NOW, for near-instant
+        // ledger visibility in the common case. Deliberately NOT awaited before
+        // responding to the customer — their payment confirmation should never
+        // wait on, or fail because of, Postgres being slow or briefly down.
+        // If this fails (or the process crashes before it even runs), the
+        // outbox sweeper running on its own interval guarantees this entry
+        // gets published eventually anyway — that's what makes this durable,
+        // not just "try once and hope."
+        publishOutboxEntry(outboxEntry).catch(err => logger.error({ err }, "Eager outbox publish failed"))
 
         await order.populate("shopOrders.shopOrderItems.item", "name image price")
         await order.populate("shopOrders.shop", "name")
@@ -310,12 +361,30 @@ export const verifyPayment = async (req, res) => {
 export const getMyOrders = async (req, res) => {
     try {
         const user = await User.findById(req.userId)
+
+        // NEW: an online order exists in MongoDB from the moment "Pay & Place
+        // Order" is clicked — BEFORE Razorpay's popup even opens (see
+        // placeOrder). If the customer abandons checkout, closes the popup,
+        // or the payment fails, that order is real in the database but was
+        // never actually a genuine, successful order from the customer's
+        // point of view. Rather than showing it and waiting for the 30-minute
+        // staleOrderCleanup sweep to mark it cancelled, it's simply excluded
+        // from view entirely until it's actually valid: COD is valid the
+        // moment it's placed (no advance payment gate to clear), online is
+        // only valid once payment is actually confirmed.
+        const VALID_ORDER_FILTER = {
+            $or: [
+                { paymentMethod: "cod" },
+                { paymentMethod: "online", payment: true }
+            ]
+        }
+
         // FIX (delivery OTP hardening): explicit exclusion of the OTP fields on
         // every order returned here — this is the actual privacy boundary now
         // (see order.model.js for why relying on schema-level select:false was
         // unreliable for these particular fields).
         if (user.role == "user") {
-            const orders = await Order.find({ user: req.userId })
+            const orders = await Order.find({ user: req.userId, ...VALID_ORDER_FILTER })
                 .select('-shopOrders.deliveryOtpHash -shopOrders.otpExpires -shopOrders.deliveryOtpAttempts')
                 .sort({ createdAt: -1 })
                 .populate("shopOrders.shop", "name")
@@ -324,7 +393,7 @@ export const getMyOrders = async (req, res) => {
 
             return res.status(200).json(orders)
         } else if (user.role == "owner") {
-            const orders = await Order.find({ "shopOrders.owner": req.userId })
+            const orders = await Order.find({ "shopOrders.owner": req.userId, ...VALID_ORDER_FILTER })
                 .select('-shopOrders.deliveryOtpHash -shopOrders.otpExpires -shopOrders.deliveryOtpAttempts')
                 .sort({ createdAt: -1 })
                 .populate("shopOrders.shop", "name")
@@ -557,9 +626,106 @@ export const cancelOrderItem = async (req, res) => {
             return res.status(400).json({ message: "this order can no longer be cancelled — the shop has already started preparing it" })
         }
 
+        // NEW (refund logic): previously cancelling an ONLINE-paid order did
+        // nothing to the money — the order just flipped to "cancelled" while
+        // the customer's payment sat captured with no refund ever initiated.
+        // Refund policy: only the cancelled shop's own subtotal is refunded,
+        // not any portion of the order-level delivery fee — deliveryFee isn't
+        // decomposed per shop in this data model, and this order can still
+        // have other shops' items in transit, so the delivery itself may
+        // still be happening.
+        //
+        // Ordering matters here: the actual Razorpay refund call happens
+        // BEFORE the Mongo cancellation is saved. If the refund fails, this
+        // returns an error and the order stays in its original, still-
+        // cancellable "pending" state — never "cancelled" with no refund
+        // actually issued.
+        let refundResult = null
+
+        if (order.paymentMethod === "online" && order.payment === true) {
+            const pgClient = await pgPool.connect()
+            try {
+                await pgClient.query("BEGIN")
+
+                const paymentRow = await pgClient.query(
+                    "SELECT id, amount FROM payments WHERE razorpay_payment_id = $1",
+                    [order.razorpayPaymentId]
+                )
+
+                if (paymentRow.rows.length === 0) {
+                    // Legacy order paid before the payments ledger existed —
+                    // there's no local record to validate against, but the
+                    // customer's money should still be refundable. Falls back
+                    // to calling Razorpay directly without the Postgres-side
+                    // over-refund guard; not written to the refunds ledger,
+                    // since there's no payment row for it to reference (a
+                    // real foreign key, so it can't point at nothing).
+                    console.error(`No payments ledger row for razorpayPaymentId ${order.razorpayPaymentId} — refunding without ledger tracking (likely a pre-ledger order).`)
+                    await pgClient.query("ROLLBACK")
+                } else {
+                    // FIX (race condition, same class as acceptOrder's fix):
+                    // `SELECT ... FOR UPDATE` locks this payment row for the
+                    // duration of the transaction, so a second concurrent
+                    // cancellation request against the same payment can't read
+                    // a stale "amount already refunded" total before this one
+                    // commits — the same read-then-write race the MongoDB
+                    // transaction closed for accept-order, solved here with
+                    // Postgres's row-locking instead.
+                    await pgClient.query("SELECT amount FROM payments WHERE id = $1 FOR UPDATE", [paymentRow.rows[0].id])
+
+                    const refundedSoFar = await pgClient.query(
+                        "SELECT COALESCE(SUM(amount), 0) AS total FROM refunds WHERE payment_id = $1",
+                        [paymentRow.rows[0].id]
+                    )
+                    const alreadyRefunded = Number(refundedSoFar.rows[0].total)
+                    const remaining = Number(paymentRow.rows[0].amount) - alreadyRefunded
+
+                    if (shopOrder.subtotal > remaining) {
+                        await pgClient.query("ROLLBACK")
+                        return res.status(400).json({ message: "refund amount exceeds what remains on this payment — it may have already been refunded" })
+                    }
+
+                    const razorpayRefund = await instance.payments.refund(order.razorpayPaymentId, {
+                        amount: Math.round(shopOrder.subtotal * 100), // paise, same unit Razorpay expects everywhere else in this app
+                        speed: "normal",
+                        notes: {
+                            mongoOrderId: String(order._id),
+                            mongoShopId: String(shopId),
+                            reason: reason || "Not specified"
+                        }
+                    })
+
+                    await pgClient.query(
+                        `INSERT INTO refunds (payment_id, mongo_order_id, mongo_shop_id, razorpay_refund_id, amount, reason, status)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                        [paymentRow.rows[0].id, String(order._id), String(shopId), razorpayRefund.id, shopOrder.subtotal, reason || "Not specified", razorpayRefund.status]
+                    )
+
+                    await pgClient.query("COMMIT")
+                    refundResult = razorpayRefund
+                }
+            } catch (refundError) {
+                await pgClient.query("ROLLBACK").catch(() => {})
+                console.error("Refund failed during cancellation:", refundError.message)
+                return res.status(500).json({ message: "Could not process refund — cancellation was not completed. Please try again." })
+            } finally {
+                pgClient.release()
+            }
+        }
+
         shopOrder.status = "cancelled"
         shopOrder.cancelledAt = Date.now()
         shopOrder.cancelReason = reason || "Not specified"
+
+        // NEW: persist a display copy of the refund result right alongside
+        // the cancellation itself — same save() call, so there's no window
+        // where an order shows "cancelled" without also showing its refund
+        // outcome. Postgres's refunds table remains the authoritative
+        // record; this is purely what the customer's order list reads from.
+        if (refundResult) {
+            shopOrder.refundAmount = shopOrder.subtotal
+            shopOrder.refundStatus = refundResult.status
+        }
 
         await order.save()
         await order.populate("shopOrders.shop", "name")
@@ -581,8 +747,9 @@ export const cancelOrderItem = async (req, res) => {
         }
 
         return res.status(200).json({
-            message: "order cancelled successfully",
-            shopOrder: updatedShopOrder
+            message: refundResult ? "order cancelled and refund initiated" : "order cancelled successfully",
+            shopOrder: updatedShopOrder,
+            refund: refundResult ? { id: refundResult.id, amount: shopOrder.subtotal, status: refundResult.status } : null
         })
 
     } catch (error) {

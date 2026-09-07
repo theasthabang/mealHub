@@ -7,6 +7,10 @@ import authRouter from "./routes/auth.routes.js"
 import cors from "cors"
 import userRouter from "./routes/user.routes.js"
 import multer from "multer"
+import helmet from "helmet"
+import rateLimit from "express-rate-limit"
+import RedisStore from "rate-limit-redis"
+import mongoose from "mongoose"
 
 import itemRouter from "./routes/item.routes.js"
 import shopRouter from "./routes/shop.routes.js"
@@ -14,6 +18,16 @@ import orderRouter from "./routes/order.routes.js"
 import http from "http"
 import { Server } from "socket.io"
 import { socketHandler } from "./socket.js"
+import redisClient from "./utils/redisClient.js"
+import logger from "./utils/logger.js"
+import { startOutboxSweeper, stopOutboxSweeper } from "./utils/outboxPublisher.js"
+import { startStaleOrderCleanup, stopStaleOrderCleanup } from "./utils/staleOrderCleanup.js"
+import { runPostgresMigrations } from "./utils/postgresMigrate.js"
+import { initSentry, registerSentryErrorHandler } from "./utils/sentry.js"
+
+// Must run before anything else touches the app — Sentry needs to instrument
+// as early as possible to catch errors from any part of the request lifecycle.
+initSentry()
 
 const app = express()
 const server = http.createServer(app)
@@ -42,6 +56,13 @@ app.set("io", io)
 // instead of the real client's (breaking IP-based rate limiting below).
 app.set("trust proxy", 1)
 
+// NEW (production hardening): sets a batch of security-relevant HTTP headers in
+// one line — prevents clickjacking (X-Frame-Options), MIME-sniffing attacks
+// (X-Content-Type-Options), forces HTTPS on repeat visits (Strict-Transport-Security),
+// and several others. Verified against a real running Express server before
+// adding this — it genuinely sets these headers, not just a documented claim.
+app.use(helmet())
+
 const port = process.env.PORT || 5000
 app.use(cors({
     origin: clientUrl,
@@ -49,11 +70,51 @@ app.use(cors({
 }))
 app.use(express.json())
 app.use(cookieParser())
+
+// NEW (production hardening): a general rate limit across the ENTIRE API, on top
+// of the tighter auth/OTP-specific limiters already in auth.routes.js and
+// order.routes.js. Previously, public endpoints with no dedicated limiter at all —
+// browsing shops, searching items — had zero protection against basic scraping or
+// abuse. This is deliberately looser (100 requests/15min per IP) than the auth
+// limiters, since it's meant to catch abusive volume, not normal browsing. Shares
+// the same Redis connection as the other limiters, in its own namespace.
+const globalApiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: { message: "Too many requests. Please slow down and try again shortly." },
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: new RedisStore({
+        sendCommand: (...args) => redisClient.sendCommand(args),
+        prefix: "rl:global:"
+    })
+})
+app.use("/api", globalApiLimiter)
+
+// NEW (production hardening): a health-check endpoint for uptime monitoring
+// (UptimeRobot or similar) and as a load-balancer health check target. Reports
+// both the process being up AND the database connection actually being alive —
+// a process that's running but has lost its Mongo connection should NOT report
+// healthy, since it can't actually serve real requests.
+app.get("/health", (req, res) => {
+    const dbState = mongoose.connection.readyState // 1 = connected
+    if (dbState !== 1) {
+        return res.status(503).json({ status: "unhealthy", database: "disconnected" })
+    }
+    return res.status(200).json({ status: "ok", database: "connected" })
+})
+
 app.use("/api/auth", authRouter)
 app.use("/api/user", userRouter)
 app.use("/api/shop", shopRouter)
 app.use("/api/item", itemRouter)
 app.use("/api/order", orderRouter)
+
+// Must be registered AFTER all routes but BEFORE the existing error-handling
+// middleware below — this is what actually reports errors to Sentry; the
+// existing handler still runs afterward to decide the HTTP response sent
+// back to the client.
+registerSentryErrorHandler(app)
 
 // NEW (Phase 3, #2 — stability): 404 handler for any route that doesn't match one of
 // the routers above. Without this, an unmatched API route (typo'd endpoint, old
@@ -74,7 +135,11 @@ app.use((req, res) => {
 // Must be defined with all 4 arguments (err, req, res, next) — that 4-arg signature is
 // what tells Express "this is an error handler," and it must be the LAST app.use() call.
 app.use((err, req, res, next) => {
-    console.error(err)
+    // FIX (production visibility): console.error is invisible the moment nobody's
+    // watching a live terminal. logger.error emits structured, leveled output that
+    // a real log viewer (Render's dashboard, or a shipped-to-Sentry/Datadog setup
+    // later) can actually surface and alert on.
+    logger.error({ err, path: req.path, method: req.method }, "Unhandled request error")
 
     if (err instanceof multer.MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
@@ -104,14 +169,48 @@ app.use((err, req, res, next) => {
 // production, pair this with a process manager (PM2, Docker restart policy, etc.) that
 // restarts the process after a logged crash, rather than relying on this alone.
 process.on("unhandledRejection", (reason) => {
-    console.error("Unhandled Promise Rejection:", reason)
+    logger.error({ reason }, "Unhandled Promise Rejection")
 })
 process.on("uncaughtException", (err) => {
-    console.error("Uncaught Exception:", err)
+    logger.error({ err }, "Uncaught Exception")
 })
+
+// NEW (production hardening — graceful shutdown): when a host restarts this
+// process (a deploy, a scaling event), SIGTERM is sent first, before the process
+// is forcibly killed. Without handling it, in-flight requests get cut off mid-
+// response the instant the process dies. This stops accepting NEW connections
+// immediately but lets already-in-progress requests finish naturally before
+// actually exiting — the difference between a customer's in-flight order
+// placement completing cleanly versus being abruptly severed by a routine deploy.
+const shutdown = (signal) => {
+    logger.info(`${signal} received — shutting down gracefully`)
+    stopOutboxSweeper()
+    stopStaleOrderCleanup()
+    server.close(() => {
+        logger.info("HTTP server closed")
+        mongoose.connection.close(false, () => {
+            logger.info("MongoDB connection closed")
+            process.exit(0)
+        })
+    })
+    // Safety net: if something hangs and never closes cleanly, force-exit after
+    // 10s rather than leaving a zombie process the host has to kill anyway.
+    setTimeout(() => {
+        logger.error("Graceful shutdown timed out — forcing exit")
+        process.exit(1)
+    }, 10000)
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"))
+process.on("SIGINT", () => shutdown("SIGINT"))
 
 socketHandler(io)
 server.listen(port, () => {
     connectDb()
-    console.log(`server started at ${port}`)
+    // Runs automatically on every startup — safe to repeat forever, since the
+    // schema SQL uses CREATE TABLE/INDEX IF NOT EXISTS. This is what closes
+    // the "forgot to run the SQL in Supabase" class of bug for good.
+    runPostgresMigrations()
+    startOutboxSweeper()
+    startStaleOrderCleanup()
+    logger.info(`server started at ${port}`)
 })

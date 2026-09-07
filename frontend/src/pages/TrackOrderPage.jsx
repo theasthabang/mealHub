@@ -104,20 +104,38 @@ function TrackOrderPage() {
                                 </div> : <p className='font-semibold'>Delivery Boy is not assigned yet.</p>}
                         </> : <p className='text-green-600 font-semibold text-lg'>Delivered</p>}
 
-                        {(shopOrder.assignedDeliveryBoy && shopOrder.status !== "delivered") && (
-                            <div className="h-[400px] w-full rounded-2xl overflow-hidden shadow-md">
-                                <DeliveryBoyTracking data={{
-                                    deliveryBoyLocation: liveLocations[shopOrder.assignedDeliveryBoy._id] || {
-                                        lat: shopOrder.assignedDeliveryBoy.location.coordinates[1],
-                                        lon: shopOrder.assignedDeliveryBoy.location.coordinates[0]
-                                    },
-                                    customerLocation: {
-                                        lat: currentOrder.deliveryAddress.latitude,
-                                        lon: currentOrder.deliveryAddress.longitude
-                                    }
-                                }} />
-                            </div>
-                        )}
+                        {(shopOrder.assignedDeliveryBoy && shopOrder.status !== "delivered") && (() => {
+                            // FIX: User.location.coordinates defaults to [0, 0] in the
+                            // schema until the delivery boy's app sends its first real
+                            // GPS fix. Rendering the map with that default previously
+                            // showed the delivery boy sitting off the coast of West
+                            // Africa instead of communicating "location not available
+                            // yet" — this checks for the real default explicitly.
+                            const fallback = shopOrder.assignedDeliveryBoy.location?.coordinates
+                            const hasRealFallback = fallback && (fallback[0] !== 0 || fallback[1] !== 0)
+                            const liveLocation = liveLocations[shopOrder.assignedDeliveryBoy._id]
+                            const resolvedLocation = liveLocation || (hasRealFallback ? { lat: fallback[1], lon: fallback[0] } : null)
+
+                            if (!resolvedLocation) {
+                                return (
+                                    <div className="h-[200px] w-full rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center">
+                                        <p className='text-gray-400 text-sm'>Waiting for delivery partner's location...</p>
+                                    </div>
+                                )
+                            }
+
+                            return (
+                                <div className="h-[400px] w-full rounded-2xl overflow-hidden shadow-md">
+                                    <DeliveryBoyTracking data={{
+                                        deliveryBoyLocation: resolvedLocation,
+                                        customerLocation: {
+                                            lat: currentOrder.deliveryAddress.latitude,
+                                            lon: currentOrder.deliveryAddress.longitude
+                                        }
+                                    }} />
+                                </div>
+                            )
+                        })()}
                     </div>
                 ))
             )}

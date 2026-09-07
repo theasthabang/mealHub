@@ -10,6 +10,12 @@ const userSlice = createSlice({
     currentAddress: null,
     shopInMyCity: null,
     itemsInMyCity: null,
+    // NEW: mirrors myOrdersLoading below — useGetShopByCity/useGetItemsByCity had
+    // no equivalent loading flag, so UserDashboard.jsx couldn't tell "still
+    // fetching" apart from "genuinely no shops in this city," and would flash a
+    // false empty state while the real data was still on its way.
+    shopInMyCityLoading: true,
+    itemsInMyCityLoading: true,
     cartItems: [],
     totalAmount: 0,
     myOrders: [],
@@ -33,8 +39,14 @@ const userSlice = createSlice({
     setShopsInMyCity: (state, action) => {
       state.shopInMyCity = action.payload
     },
+    setShopInMyCityLoading: (state, action) => {
+      state.shopInMyCityLoading = action.payload
+    },
     setItemsInMyCity: (state, action) => {
       state.itemsInMyCity = action.payload
+    },
+    setItemsInMyCityLoading: (state, action) => {
+      state.itemsInMyCityLoading = action.payload
     },
     setSocket: (state, action) => {
       state.socket = action.payload
@@ -63,6 +75,15 @@ const userSlice = createSlice({
     removeCartItem: (state, action) => {
       state.cartItems = state.cartItems.filter(i => i.id !== action.payload)
       state.totalAmount = state.cartItems.reduce((sum, i) => sum + i.price * i.quantity, 0)
+    },
+    // NEW: previously nothing ever cleared the cart after a successful order —
+    // a customer landing on "Order Placed!" and then navigating back to /cart
+    // would still see the items they just ordered, inviting an accidental
+    // re-order. Dispatched from CheckOut.jsx right after a successful COD or
+    // online payment.
+    clearCart: (state) => {
+      state.cartItems = []
+      state.totalAmount = 0
     },
     setMyOrders: (state, action) => {
       state.myOrders = action.payload
@@ -102,13 +123,20 @@ const userSlice = createSlice({
     // is only ever dispatched against the USER's myOrders (owner cancellations don't
     // exist — only customers cancel, via updateOrderStatus above instead).
     cancelOrderStatus: (state, action) => {
-      const { orderId, shopId, cancelReason } = action.payload
+      const { orderId, shopId, cancelReason, refundAmount, refundStatus } = action.payload
       const order = state.myOrders.find(o => o._id == orderId)
       if (order) {
         const shopOrder = order.shopOrders.find(so => so.shop._id == shopId)
         if (shopOrder) {
           shopOrder.status = "cancelled"
           shopOrder.cancelReason = cancelReason
+          // NEW: refund summary, only set when this cancellation actually
+          // triggered a real refund (undefined for COD/unpaid orders,
+          // which is fine — the UI only shows this section when it's present)
+          if (refundAmount !== undefined) {
+            shopOrder.refundAmount = refundAmount
+            shopOrder.refundStatus = refundStatus
+          }
         }
       }
     },
@@ -152,7 +180,8 @@ const userSlice = createSlice({
 
 export const {
   setUserData, setCurrentAddress, setCurrentCity, setCurrentState, setShopsInMyCity,
-  setItemsInMyCity, addToCart, updateQuantity, removeCartItem, setMyOrders, setMyOrdersLoading, addMyOrder,
+  setShopInMyCityLoading, setItemsInMyCity, setItemsInMyCityLoading, addToCart,
+  updateQuantity, removeCartItem, clearCart, setMyOrders, setMyOrdersLoading, addMyOrder,
   updateOrderStatus, setSearchItems, setTotalAmount, setSocket, updateRealtimeOrderStatus,
   cancelOrderStatus, setItemRating
 } = userSlice.actions

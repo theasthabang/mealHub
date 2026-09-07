@@ -14,7 +14,7 @@ import toast from 'react-hot-toast'
 import { FaMobileScreenButton } from "react-icons/fa6";
 import { useNavigate } from 'react-router-dom';
 import { serverUrl } from '../App';
-import { addMyOrder, setTotalAmount, setUserData } from '../redux/userSlice';
+import { addMyOrder, clearCart, setTotalAmount, setUserData } from '../redux/userSlice';
 import { getErrorMessage } from '../utils/getErrorMessage';
 import MobileVerificationModal from '../components/MobileVerificationModal';
 
@@ -60,11 +60,29 @@ function CheckOut() {
     dispatch(setLocation({ lat, lon: lng }))
     getAddressByLatLng(lat, lng)
   }
+  // FIX (broken for every customer): this used to read userData.location.coordinates
+  // — a User schema field that ONLY ever gets populated for delivery boys (see
+  // useUpdateLocation.jsx, which gates its watchPosition call to role ===
+  // "deliveryBoy"). For a customer, that field never leaves its schema default of
+  // [0, 0] — clicking this button jumped the map to the Gulf of Guinea instead of
+  // the customer's actual location. Now calls the browser's geolocation API
+  // directly, the same way useGetCity.jsx already does on page load.
   const getCurrentLocation = () => {
-    const latitude = userData.location.coordinates[1]
-    const longitude = userData.location.coordinates[0]
-    dispatch(setLocation({ lat: latitude, lon: longitude }))
-    getAddressByLatLng(latitude, longitude)
+    if (!navigator.geolocation) {
+      return toast.error("Geolocation is not supported by your browser")
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const latitude = position.coords.latitude
+        const longitude = position.coords.longitude
+        dispatch(setLocation({ lat: latitude, lon: longitude }))
+        getAddressByLatLng(latitude, longitude)
+      },
+      () => {
+        toast.error("Could not get your current location. Please check location permissions.")
+      },
+      { enableHighAccuracy: true }
+    )
   }
 
   const getAddressByLatLng = async (lat, lng) => {
@@ -113,6 +131,9 @@ function CheckOut() {
 
       if (paymentMethod == "cod") {
         dispatch(addMyOrder(result.data))
+        // FIX: nothing previously cleared the cart after a successful order —
+        // navigating back to /cart would still show what was just ordered.
+        dispatch(clearCart())
         toast.success("Order placed successfully!")
         navigate("/order-placed")
       } else {
@@ -140,6 +161,7 @@ function CheckOut() {
             orderId
           }, { withCredentials: true })
           dispatch(addMyOrder(result.data))
+          dispatch(clearCart())
           toast.success("Payment successful! Order placed.")
           navigate("/order-placed")
         } catch (error) {

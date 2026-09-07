@@ -2,6 +2,7 @@ import axios from 'axios'
 import toast from 'react-hot-toast'
 import { store } from '../redux/store'
 import { setUserData } from '../redux/userSlice'
+import { serverUrl } from '../App'
 
 // NEW (Phase 4 — axios 401 interceptor): registers a global response interceptor on
 // axios's default singleton instance. Since every file in this app does
@@ -24,7 +25,18 @@ import { setUserData } from '../redux/userSlice'
 axios.interceptors.response.use(
     (response) => response,
     (error) => {
-        if (error?.response?.status === 401) {
+        // FIX (false-positive logout): this patches the SHARED default axios
+        // instance, and useGetCity.jsx calls Geoapify directly through that same
+        // instance (`axios.get('https://api.geoapify.com/...')`) rather than a
+        // dedicated backend-only client. Without this check, a 401 from Geoapify
+        // itself (a rotated/invalid API key, or a free-tier rate limit) would be
+        // indistinguishable from OUR backend's session-expiry 401 — silently
+        // logging out a legitimately signed-in user over a third party's error
+        // that has nothing to do with their session. Only react to 401s that
+        // actually came from our own backend.
+        const isOwnBackendRequest = error?.config?.url?.startsWith(serverUrl)
+
+        if (error?.response?.status === 401 && isOwnBackendRequest) {
             const state = store.getState()
             const wasLoggedIn = !!state.user.userData
 

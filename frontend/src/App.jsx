@@ -65,12 +65,23 @@ function App() {
     useGetMyOrders()
 
     useEffect(() => {
+        // FIX (wasted, continuously-retrying failed connections on public
+        // pages): this used to connect a socket unconditionally on every
+        // mount — including on /signin, /signup, and before
+        // useGetCurrentUser() has resolved whether anyone is even logged in.
+        // Since socket.js's handshake requires a valid JWT cookie, every one
+        // of those connection attempts before login gets rejected — and
+        // Socket.IO's client automatically retries reconnecting by default,
+        // meaning a visitor simply sitting on the sign-in page generated a
+        // continuous loop of failed connection attempts in the background
+        // for no reason at all. Only connect once there's an actual
+        // logged-in user.
+        if (!userData) return
+
         const socketInstance = io(serverUrl, { withCredentials: true })
         dispatch(setSocket(socketInstance))
         socketInstance.on('connect', () => {
-            if (userData) {
-                socketInstance.emit('identity', { userId: userData._id })
-            }
+            socketInstance.emit('identity', { userId: userData._id })
         })
         return () => {
             socketInstance.disconnect()
