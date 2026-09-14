@@ -8,12 +8,22 @@ import AddToCartButton from './AddToCartButton'
 // -- only the visual layer and the add-to-cart interaction pattern changed
 // (now a single + that becomes a live stepper, instead of a separate
 // select-quantity-then-confirm flow).
-function FoodCard({ data, shopClosed = false }) {
+function FoodCard({ data, shopClosed = false, offer = null }) {
     const isSoldOut = data.isAvailable === false || shopClosed
 
     return (
         <div className={`bg-white rounded-2xl border border-zinc-100 overflow-hidden transition-shadow duration-300 flex flex-col ${isSoldOut ? "opacity-60" : "hover:shadow-[0_8px_24px_rgba(0,0,0,0.08)]"}`}>
             <div className='relative w-full h-[150px] bg-zinc-50'>
+                {/* NEW: real offer badge — the item's own price/display is
+                    never altered by this, since replicating the actual
+                    discount math here would risk drifting from what
+                    placeOrder actually charges. Just an honest "an offer
+                    applies here" signal, using the offer's real title. */}
+                {offer && (
+                    <div className='absolute top-2.5 left-2.5 bg-[#FF4B2B] text-white text-[10px] font-semibold px-2 py-1 rounded-full max-w-[85%] truncate z-10'>
+                        {offer.title}
+                    </div>
+                )}
                 <div className='absolute top-2.5 right-2.5 bg-white rounded-full p-1.5 shadow-sm'>
                     {data.foodType == "veg"
                         ? <Leaf size={13} className='text-emerald-600' />

@@ -9,7 +9,7 @@ import AddToCartButton from './AddToCartButton'
 // `data.description` is rendered ONLY if it actually exists on the item --
 // this field wasn't seen anywhere in the real Item schema this session, so
 // no placeholder or invented text is ever shown in its place.
-function CompactFoodCard({ data, shopClosed = false }) {
+function CompactFoodCard({ data, shopClosed = false, offer = null }) {
     const isSoldOut = data.isAvailable === false || shopClosed
 
     return (
@@ -32,6 +32,13 @@ function CompactFoodCard({ data, shopClosed = false }) {
                             ? <Leaf size={11} className='text-emerald-600 shrink-0' />
                             : <Drumstick size={11} className='text-[#B5482A] shrink-0' />}
                         <h4 className='font-semibold text-sm text-zinc-900 truncate'>{data.name}</h4>
+                        {/* NEW: real offer tag, same honesty rule as FoodCard —
+                            informational only, price display untouched. */}
+                        {offer && (
+                            <span className='shrink-0 bg-[#FFF1ED] text-[#FF4B2B] text-[9px] font-semibold px-1.5 py-0.5 rounded-full max-w-[90px] truncate'>
+                                {offer.title}
+                            </span>
+                        )}
                     </div>
                     {data.description && (
                         <p className='text-xs text-zinc-400 mt-0.5 line-clamp-1'>{data.description}</p>

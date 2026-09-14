@@ -11,6 +11,7 @@ import useGetMyshop from './hooks/useGetMyShop'
 import CreateEditShop from './pages/CreateEditShop'
 import AddItem from './pages/AddItem'
 import EditItem from './pages/EditItem'
+import ManageOffers from './pages/ManageOffers'
 import useGetShopByCity from './hooks/useGetShopByCity'
 import useGetItemsByCity from './hooks/useGetItemsByCity'
 import CartPage from './pages/CartPage'
@@ -119,6 +120,7 @@ function App() {
                 <Route path='/create-edit-shop' element={<RoleRoute allowedRoles={["owner"]}><CreateEditShop /></RoleRoute>} />
                 <Route path='/add-item' element={<RoleRoute allowedRoles={["owner"]}><AddItem /></RoleRoute>} />
                 <Route path='/edit-item/:itemId' element={<RoleRoute allowedRoles={["owner"]}><EditItem /></RoleRoute>} />
+                <Route path='/manage-offers' element={<RoleRoute allowedRoles={["owner"]}><ManageOffers /></RoleRoute>} />
 
                 {/* Customer-only routes */}
                 <Route path='/cart' element={<RoleRoute allowedRoles={["user"]}><CartPage /></RoleRoute>} />

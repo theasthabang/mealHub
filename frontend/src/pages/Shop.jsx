@@ -8,10 +8,10 @@ import RestaurantMeta from '../components/RestaurantMeta'
 import MenuTabs from '../components/MenuTabs'
 import FoodCard from '../components/FoodCard'
 import CompactFoodCard from '../components/CompactFoodCard'
-//import CartSidebar from '../components/Cartsidebar'
+import CartSidebar from '../components/CartSidebar'
 import MobileCartBar from '../components/MobileCartBar'
-//import OfferCard from '../components/OfferCard'
-//import RestaurantInfo from '../components/RestaurantInfo'
+import OfferCard from '../components/OfferCard'
+import RestaurantInfo from '../components/RestaurantInfo'
 import { useSelector } from 'react-redux'
 import toast from 'react-hot-toast'
 
@@ -25,6 +25,7 @@ function Shop() {
     const { shopId } = useParams()
     const [items, setItems] = useState([])
     const [shop, setShop] = useState(null)
+    const [offers, setOffers] = useState([])
     const [activeCategory, setActiveCategory] = useState("Popular")
     const navigate = useNavigate()
     const { totalAmount } = useSelector(state => state.user)
@@ -40,9 +41,34 @@ function Shop() {
         }
     }
 
+    // NEW: real active offers for this shop, from the public endpoint built
+    // in Chunk 3. Failure here is non-critical (the page still works fine
+    // with no offers shown), so it's a quiet console warning, not a toast
+    // that interrupts browsing the menu.
+    const handleOffers = async () => {
+        try {
+            const result = await axios.get(`${serverUrl}/api/offer/active/${shopId}`, { withCredentials: true })
+            setOffers(result.data)
+        } catch (error) {
+            console.error("Could not load offers for this shop:", error)
+        }
+    }
+
     useEffect(() => {
         handleShop()
+        handleOffers()
     }, [shopId])
+
+    // NEW: split into item-specific offers (keyed by item id, for the badge
+    // on each card) and shop-wide offers (for OfferCard) -- real data, same
+    // split logic the backend itself uses to decide what to apply.
+    const itemOffersById = useMemo(() => {
+        const map = {}
+        offers.filter(o => o.item).forEach(o => { map[String(o.item._id || o.item)] = o })
+        return map
+    }, [offers])
+
+    const shopWideOffers = useMemo(() => offers.filter(o => !o.item), [offers])
 
     const isClosed = shop && !shop.isOpen
 
@@ -112,7 +138,7 @@ function Shop() {
                                 <p className='text-sm text-zinc-400 mt-0.5 mb-4'>Our most loved items, just for you.</p>
                                 <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5'>
                                     {popularItems.map(item => (
-                                        <FoodCard data={item} key={item._id} shopClosed={isClosed} />
+                                        <FoodCard data={item} key={item._id} shopClosed={isClosed} offer={itemOffersById[item._id]} />
                                     ))}
                                 </div>
                             </section>
@@ -123,7 +149,7 @@ function Shop() {
                                 <h2 className='text-xl font-bold text-zinc-900 mb-4'>{category}</h2>
                                 <div className='grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-2 gap-4'>
                                     {itemsByCategory[category].map(item => (
-                                        <CompactFoodCard data={item} key={item._id} shopClosed={isClosed} />
+                                        <CompactFoodCard data={item} key={item._id} shopClosed={isClosed} offer={itemOffersById[item._id]} />
                                     ))}
                                 </div>
                             </section>
@@ -135,11 +161,11 @@ function Shop() {
                     </div>
 
                     {/* DESKTOP CART SIDEBAR */}
-                    //<div className='hidden lg:flex flex-col gap-4'>
-                    //  <CartSidebar />
-                    //    <OfferCard totalAmount={totalAmount} />
-                    //    <RestaurantInfo shop={shop} />
-                    //</div>
+                    <div className='hidden lg:flex flex-col gap-4'>
+                        <CartSidebar />
+                        <OfferCard totalAmount={totalAmount} shopOffers={shopWideOffers} />
+                        <RestaurantInfo shop={shop} />
+                    </div>
 
                 </div>
             </div>

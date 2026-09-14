@@ -155,8 +155,28 @@ function UserOrderCard({ data }) {
                         ))}
                     </div>
 
+                    {/* NEW: real discount reveal — sourced entirely from
+                        discountAmount/originalSubtotal/appliedOffers, exactly
+                        as computed and stored server-side in placeOrder. No
+                        duplicated pricing math here, just displaying what
+                        the backend already verified and charged. */}
+                    {shopOrder.discountAmount > 0 && (
+                        <div className='flex justify-between items-center text-sm text-[#16A34A] mt-1'>
+                            <span>
+                                {shopOrder.appliedOffers?.[0]?.title || "Offer applied"}
+                                {shopOrder.appliedOffers?.length > 1 && ` +${shopOrder.appliedOffers.length - 1} more`}
+                            </span>
+                            <span className='font-medium'>-&#8377;{shopOrder.discountAmount}</span>
+                        </div>
+                    )}
+
                     <div className='flex justify-between items-center border-t pt-2'>
-                        <p className='font-semibold'>Subtotal: {shopOrder.subtotal}</p>
+                        <div>
+                            <p className='font-semibold'>Subtotal: {shopOrder.subtotal}</p>
+                            {shopOrder.discountAmount > 0 && shopOrder.originalSubtotal && (
+                                <p className='text-xs text-gray-400 line-through'>&#8377;{shopOrder.originalSubtotal}</p>
+                            )}
+                        </div>
                         <span className={`text-sm font-medium ${statusColor(shopOrder.status)}`}>{shopOrder.status}</span>
                     </div>
 

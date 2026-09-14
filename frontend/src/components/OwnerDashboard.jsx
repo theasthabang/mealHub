@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import Nav from './Nav'
 import { useSelector, useDispatch } from 'react-redux'
-import { FaUtensils, FaPen } from "react-icons/fa";
+import { FaUtensils, FaPen, FaTag } from "react-icons/fa";
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import toast from 'react-hot-toast'
@@ -115,6 +115,17 @@ function OwnerDashboard() {
             >
               <FaPen size={14} />
               <span className='hidden sm:inline'>Edit</span>
+            </button>
+
+            {/* NEW: real, working link to the offer-management page built
+                earlier -- an owner can now actually create/manage discounts
+                for their shop from here, not just view analytics/items. */}
+            <button
+              className='flex-shrink-0 flex items-center gap-2 bg-[#ff4d2d]/10 text-[#ff4d2d] px-3 py-2 rounded-lg font-medium text-sm hover:bg-[#ff4d2d]/20 transition-colors'
+              onClick={() => navigate("/manage-offers")}
+            >
+              <FaTag size={14} />
+              <span className='hidden sm:inline'>Offers</span>
             </button>
           </div>
 
