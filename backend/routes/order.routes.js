@@ -3,7 +3,7 @@ import rateLimit from "express-rate-limit"
 import RedisStore from "rate-limit-redis"
 import isAuth from "../middlewares/isAuth.js"
 import { acceptOrder, cancelOrderItem, getCurrentOrder, getDeliveryBoyAnalytics, getDeliveryBoyAssignment, getMyOrders, getOrderById, getOwnerAnalytics, getTodayDeliveries, placeOrder, sendDeliveryOtp, updateOrderStatus, verifyDeliveryOtp, verifyPayment } from "../controllers/order.controllers.js"
-import redisClient from "../utils/redisClient.js"
+import redisClient, { failOpen } from "../utils/redisClient.js"
 
 const orderRouter = express.Router()
 
@@ -17,7 +17,11 @@ const orderRouter = express.Router()
 // delivery boy who was just locked out for 5 wrong OTP guesses. Shares the same
 // Redis connection as auth.routes.js's limiters, kept in its own "rl:delivery:"
 // namespace so the two don't collide.
-const deliveryOtpSendLimiter = rateLimit({
+//
+// FIX (real incident, same as auth.routes.js): wrapped in failOpen — a Redis
+// blip here shouldn't be able to block a real delivery boy from sending or
+// verifying a delivery OTP.
+const deliveryOtpSendLimiter = failOpen(rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 5,
     message: { message: "Too many OTP requests. Please try again in 15 minutes." },
@@ -27,9 +31,9 @@ const deliveryOtpSendLimiter = rateLimit({
         sendCommand: (...args) => redisClient.sendCommand(args),
         prefix: "rl:delivery-send:"
     })
-})
+}))
 
-const deliveryOtpVerifyLimiter = rateLimit({
+const deliveryOtpVerifyLimiter = failOpen(rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 20,
     message: { message: "Too many attempts. Please try again in 15 minutes." },
@@ -39,7 +43,7 @@ const deliveryOtpVerifyLimiter = rateLimit({
         sendCommand: (...args) => redisClient.sendCommand(args),
         prefix: "rl:delivery-verify:"
     })
-})
+}))
 
 orderRouter.post("/place-order", isAuth, placeOrder)
 orderRouter.post("/verify-payment", isAuth, verifyPayment)

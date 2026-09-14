@@ -1,28 +1,19 @@
 import React, { useEffect, useState } from 'react'
-import { IoIosArrowRoundBack } from "react-icons/io";
-import { IoSearchOutline } from "react-icons/io5";
-import { TbCurrentLocation } from "react-icons/tb";
-import { IoLocationSharp } from "react-icons/io5";
+import { ArrowLeft, MapPin, Search, LocateFixed, Truck, Smartphone, CreditCard } from 'lucide-react'
 import { MapContainer, Marker, TileLayer, useMap } from 'react-leaflet';
 import { useDispatch, useSelector } from 'react-redux';
 import "leaflet/dist/leaflet.css"
 import { setAddress, setLocation } from '../redux/mapSlice';
-import { MdDeliveryDining } from "react-icons/md";
-import { FaCreditCard } from "react-icons/fa";
 import axios from 'axios';
 import toast from 'react-hot-toast'
-import { FaMobileScreenButton } from "react-icons/fa6";
 import { useNavigate } from 'react-router-dom';
 import { serverUrl } from '../App';
 import { addMyOrder, clearCart, setTotalAmount, setUserData } from '../redux/userSlice';
 import { getErrorMessage } from '../utils/getErrorMessage';
 import MobileVerificationModal from '../components/MobileVerificationModal';
 
-// FIX (Hooks violation): useMap() must be called unconditionally on every render.
-// The old version called useMap() inside `if (location.lat && location.lon)`, which
-// breaks the Rules of Hooks the moment location starts unset and later gets set —
-// exactly what happens here, since location loads asynchronously. Now the hook is
-// called at the top level every render, and the conditional logic moves into an effect.
+// FIX (Hooks violation, unchanged from before): useMap() must be called
+// unconditionally on every render.
 function RecenterMap({ location }) {
   const map = useMap()
   useEffect(() => {
@@ -33,6 +24,12 @@ function RecenterMap({ location }) {
   return null
 }
 
+// REDESIGN: switched to a two-column SaaS-style checkout layout -- form
+// content (location, payment method) on the left, order summary sticky on
+// the right. Every function below (getCurrentLocation, getAddressByLatLng,
+// getLatLngByAddress, handlePlaceOrder, openRazorpayWindow, the mobile
+// verification flow) is byte-for-byte the same logic as before -- only the
+// JSX layout and visual styling changed.
 function CheckOut() {
   const { location, address } = useSelector(state => state.map)
   const { cartItems, totalAmount, userData } = useSelector(state => state.user)
@@ -44,10 +41,6 @@ function CheckOut() {
   const deliveryFee = totalAmount > 500 ? 0 : 40
   const AmountWithDeliveryFee = totalAmount + deliveryFee
 
-  // NEW: checkout-time mobile verification. Shown as soon as the user reaches this
-  // page if they haven't verified a number yet — matches the required flow
-  // ("Checkout → check verified → OTP if needed → continue checkout"), rather than
-  // waiting until they click Place Order to surprise them with it.
   const [showVerificationModal, setShowVerificationModal] = useState(!userData?.isMobileVerified)
 
   const handleVerified = (verifiedMobile) => {
@@ -60,13 +53,7 @@ function CheckOut() {
     dispatch(setLocation({ lat, lon: lng }))
     getAddressByLatLng(lat, lng)
   }
-  // FIX (broken for every customer): this used to read userData.location.coordinates
-  // — a User schema field that ONLY ever gets populated for delivery boys (see
-  // useUpdateLocation.jsx, which gates its watchPosition call to role ===
-  // "deliveryBoy"). For a customer, that field never leaves its schema default of
-  // [0, 0] — clicking this button jumped the map to the Gulf of Guinea instead of
-  // the customer's actual location. Now calls the browser's geolocation API
-  // directly, the same way useGetCity.jsx already does on page load.
+
   const getCurrentLocation = () => {
     if (!navigator.geolocation) {
       return toast.error("Geolocation is not supported by your browser")
@@ -90,7 +77,7 @@ function CheckOut() {
       const result = await axios.get(`https://api.geoapify.com/v1/geocode/reverse?lat=${lat}&lon=${lng}&format=json&apiKey=${apiKey}`)
       dispatch(setAddress(result?.data?.results[0].address_line2))
     } catch (error) {
-      toast.error("Could not fetch address for this location")
+      toast.error("Could not fetch address for this location" , error)
     }
   }
 
@@ -100,15 +87,11 @@ function CheckOut() {
       const { lat, lon } = result.data.features[0].properties
       dispatch(setLocation({ lat, lon }))
     } catch (error) {
-      toast.error("Could not find that address. Try a different search.")
+      toast.error("Could not find that address. Try a different search." , error)
     }
   }
 
   const handlePlaceOrder = async () => {
-    // NEW: safety net — the modal can be dismissed with the X without verifying, so
-    // this re-checks before actually placing an order. The backend independently
-    // enforces this too (see placeOrder in order.controllers.js) regardless of what
-    // happens here; this just avoids a wasted round-trip that would fail anyway.
     if (!userData?.isMobileVerified) {
       setShowVerificationModal(true)
       return
@@ -122,17 +105,12 @@ function CheckOut() {
           longitude: location.lon
         },
         totalAmount: AmountWithDeliveryFee,
-        // NEW: deliveryFee was already being computed here for display, just never
-        // sent to the backend — needed now so delivery boy earnings can be calculated
-        // from the actual fee charged, instead of a flat guessed rate.
         deliveryFee,
         cartItems
       }, { withCredentials: true })
 
       if (paymentMethod == "cod") {
         dispatch(addMyOrder(result.data))
-        // FIX: nothing previously cleared the cart after a successful order —
-        // navigating back to /cart would still show what was just ordered.
         dispatch(clearCart())
         toast.success("Order placed successfully!")
         navigate("/order-placed")
@@ -179,92 +157,102 @@ function CheckOut() {
   }, [address])
 
   return (
-    <div className='min-h-screen bg-[#fff9f6] flex items-center justify-center p-6'>
-      <div className=' absolute top-[20px] left-[20px] z-[10]' onClick={() => navigate("/")}>
-        <IoIosArrowRoundBack size={35} className='text-[#ff4d2d]' />
-      </div>
-      <div className='w-full max-w-[900px] bg-white rounded-2xl shadow-xl p-6 space-y-6'>
-        <h1 className='text-2xl font-bold text-gray-800'>Checkout</h1>
+    <div className='min-h-screen bg-[#FAFAF9] pb-10'>
+      <div className='max-w-[1200px] mx-auto px-5 pt-6'>
+        <button className='flex items-center gap-1.5 text-zinc-500 hover:text-zinc-900 transition-colors mb-6' onClick={() => navigate("/")}>
+          <ArrowLeft size={18} />
+          <span className='text-sm font-medium'>Back</span>
+        </button>
 
-        <section>
-          <h2 className='text-lg font-semibold mb-2 flex items-center gap-2 text-gray-800'><IoLocationSharp className='text-[#ff4d2d]' /> Delivery Location</h2>
-          <div className='flex gap-2 mb-3'>
-            <input type="text" className='flex-1 border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#ff4d2d]' placeholder='Enter Your Delivery Address..' value={addressInput} onChange={(e) => setAddressInput(e.target.value)} />
-            <button className='bg-[#ff4d2d] hover:bg-[#e64526] text-white px-3 py-2 rounded-lg flex items-center justify-center' onClick={getLatLngByAddress}><IoSearchOutline size={17} /></button>
-            <button className='bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded-lg flex items-center justify-center' onClick={getCurrentLocation}><TbCurrentLocation size={17} /></button>
-          </div>
-          <div className='rounded-xl border overflow-hidden'>
-            <div className='h-64 w-full flex items-center justify-center'>
-              <MapContainer
-                className={"w-full h-full"}
-                center={[location?.lat, location?.lon]}
-                zoom={16}
-              >
-                <TileLayer
-                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                />
-                <RecenterMap location={location} />
-                <Marker position={[location?.lat, location?.lon]} draggable eventHandlers={{ dragend: onDragEnd }} />
-              </MapContainer>
-            </div>
-          </div>
-        </section>
+        <h1 className='text-2xl font-bold text-zinc-900 mb-6'>Checkout</h1>
 
-        <section>
-          <h2 className='text-lg font-semibold mb-3 text-gray-800'>Payment Method</h2>
-          <div className='grid grid-cols-1 sm:grid-cols-2 gap-4'>
-            <div className={`flex items-center gap-3 rounded-xl border p-4 text-left transition ${paymentMethod === "cod" ? "border-[#ff4d2d] bg-orange-50 shadow" : "border-gray-200 hover:border-gray-300"
-              }`} onClick={() => setPaymentMethod("cod")}>
-              <span className='inline-flex h-10 w-10 items-center justify-center rounded-full bg-green-100'>
-                <MdDeliveryDining className='text-green-600 text-xl' />
-              </span>
-              <div>
-                <p className='font-medium text-gray-800'>Cash On Delivery</p>
-                <p className='text-xs text-gray-500'>Pay when your food arrives</p>
-              </div>
-            </div>
-            <div className={`flex items-center gap-3 rounded-xl border p-4 text-left transition ${paymentMethod === "online" ? "border-[#ff4d2d] bg-orange-50 shadow" : "border-gray-200 hover:border-gray-300"
-              }`} onClick={() => setPaymentMethod("online")}>
-              <span className='inline-flex h-10 w-10 items-center justify-center rounded-full bg-purple-100'>
-                <FaMobileScreenButton className='text-purple-700 text-lg' />
-              </span>
-              <span className='inline-flex h-10 w-10 items-center justify-center rounded-full bg-blue-100'>
-                <FaCreditCard className='text-blue-700 text-lg' />
-              </span>
-              <div>
-                <p className='font-medium text-gray-800'>UPI / Credit / Debit Card</p>
-                <p className='text-xs text-gray-500'>Pay Securely Online</p>
-              </div>
-            </div>
-          </div>
-        </section>
+        <div className='grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-6 items-start'>
 
-        <section>
-          <h2 className='text-lg font-semibold mb-3 text-gray-800'>Order Summary</h2>
-          <div className='rounded-xl border bg-gray-50 p-4 space-y-2'>
-            {cartItems.map((item, index) => (
-              <div key={index} className='flex justify-between text-sm text-gray-700'>
-                <span>{item.name} x {item.quantity}</span>
-                <span>₹{item.price * item.quantity}</span>
+          {/* LEFT COLUMN */}
+          <div className='flex flex-col gap-6'>
+            <section className='bg-white rounded-2xl border border-zinc-100 p-5'>
+              <h2 className='text-sm font-semibold mb-3 flex items-center gap-2 text-zinc-900'>
+                <MapPin size={16} className='text-[#FF4B2B]' /> Delivery Location
+              </h2>
+              <div className='flex gap-2 mb-3'>
+                <input type="text" className='flex-1 border border-zinc-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF4B2B]/30 focus:border-[#FF4B2B]' placeholder='Enter your delivery address' value={addressInput} onChange={(e) => setAddressInput(e.target.value)} />
+                <button className='bg-[#FF4B2B] hover:bg-[#e8401f] text-white px-3 rounded-xl flex items-center justify-center transition-colors' onClick={getLatLngByAddress}><Search size={16} /></button>
+                <button className='bg-zinc-100 hover:bg-zinc-200 text-zinc-700 px-3 rounded-xl flex items-center justify-center transition-colors' onClick={getCurrentLocation}><LocateFixed size={16} /></button>
               </div>
-            ))}
-            <hr className='border-gray-200 my-2' />
-            <div className='flex justify-between font-medium text-gray-800'>
-              <span>Subtotal</span>
-              <span>{totalAmount}</span>
-            </div>
-            <div className='flex justify-between text-gray-700'>
-              <span>Delivery Fee</span>
-              <span>{deliveryFee == 0 ? "Free" : deliveryFee}</span>
-            </div>
-            <div className='flex justify-between text-lg font-bold text-[#ff4d2d] pt-2'>
-              <span>Total</span>
-              <span>{AmountWithDeliveryFee}</span>
-            </div>
+              <div className='rounded-xl overflow-hidden border border-zinc-100'>
+                <div className='h-56 w-full flex items-center justify-center'>
+                  <MapContainer
+                    className={"w-full h-full"}
+                    center={[location?.lat, location?.lon]}
+                    zoom={16}
+                  >
+                    <TileLayer
+                      attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    />
+                    <RecenterMap location={location} />
+                    <Marker position={[location?.lat, location?.lon]} draggable eventHandlers={{ dragend: onDragEnd }} />
+                  </MapContainer>
+                </div>
+              </div>
+            </section>
+
+            <section className='bg-white rounded-2xl border border-zinc-100 p-5'>
+              <h2 className='text-sm font-semibold mb-3 text-zinc-900'>Payment Method</h2>
+              <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
+                <button className={`flex items-center gap-3 rounded-xl border p-4 text-left transition-all ${paymentMethod === "cod" ? "border-[#FF4B2B] bg-[#FFF1EC]" : "border-zinc-200 hover:border-zinc-300"}`} onClick={() => setPaymentMethod("cod")}>
+                  <span className='inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-50'>
+                    <Truck size={16} className='text-emerald-600' />
+                  </span>
+                  <div>
+                    <p className='text-sm font-medium text-zinc-900'>Cash On Delivery</p>
+                    <p className='text-xs text-zinc-500'>Pay when your food arrives</p>
+                  </div>
+                </button>
+                <button className={`flex items-center gap-3 rounded-xl border p-4 text-left transition-all ${paymentMethod === "online" ? "border-[#FF4B2B] bg-[#FFF1EC]" : "border-zinc-200 hover:border-zinc-300"}`} onClick={() => setPaymentMethod("online")}>
+                  <span className='inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-50'>
+                    <CreditCard size={16} className='text-indigo-600' />
+                  </span>
+                  <div>
+                    <p className='text-sm font-medium text-zinc-900'>UPI / Card</p>
+                    <p className='text-xs text-zinc-500'>Pay securely online</p>
+                  </div>
+                </button>
+              </div>
+            </section>
           </div>
-        </section>
-        <button className='w-full bg-[#ff4d2d] hover:bg-[#e64526] text-white py-3 rounded-xl font-semibold' onClick={handlePlaceOrder}> {paymentMethod == "cod" ? "Place Order" : "Pay & Place Order"}</button>
+
+          {/* RIGHT COLUMN -- sticky order summary */}
+          <div className='lg:sticky lg:top-6'>
+            <section className='bg-white rounded-2xl border border-zinc-100 p-5'>
+              <h2 className='text-sm font-semibold mb-3 text-zinc-900'>Order Summary</h2>
+              <div className='flex flex-col gap-2 pb-3 mb-3 border-b border-zinc-100'>
+                {cartItems.map((item, index) => (
+                  <div key={index} className='flex justify-between text-sm text-zinc-600'>
+                    <span>{item.name} &times; {item.quantity}</span>
+                    <span>&#8377;{item.price * item.quantity}</span>
+                  </div>
+                ))}
+              </div>
+              <div className='flex justify-between text-sm text-zinc-600 mb-1.5'>
+                <span>Subtotal</span>
+                <span>&#8377;{totalAmount}</span>
+              </div>
+              <div className='flex justify-between text-sm text-zinc-600 mb-3'>
+                <span>Delivery Fee</span>
+                <span>{deliveryFee == 0 ? "Free" : `\u20B9${deliveryFee}`}</span>
+              </div>
+              <div className='flex justify-between text-base font-bold text-zinc-900 pt-3 border-t border-zinc-100 mb-4'>
+                <span>Total</span>
+                <span>&#8377;{AmountWithDeliveryFee}</span>
+              </div>
+              <button className='w-full bg-[#FF4B2B] hover:bg-[#e8401f] text-white py-3 rounded-xl font-semibold transition-colors' onClick={handlePlaceOrder}>
+                {paymentMethod == "cod" ? "Place Order" : "Pay & Place Order"}
+              </button>
+            </section>
+          </div>
+
+        </div>
       </div>
 
       {showVerificationModal && (

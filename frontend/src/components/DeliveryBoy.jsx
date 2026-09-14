@@ -10,34 +10,37 @@ import DeliveryBoyTracking from './DeliveryBoyTracking'
 import { ClipLoader } from 'react-spinners'
 import toast from 'react-hot-toast'
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { FaWallet, FaBoxOpen, FaChartLine } from "react-icons/fa"
+import { Wallet, Package, TrendingUp, Phone, MapPin, User as UserIcon, CheckCircle2 } from "lucide-react"
 import { getErrorMessage } from '../utils/getErrorMessage'
+import StatCard from './StatCard'
+import AvailableOrderCard from './AvailableOrderCard'
+import DeliveryHistoryCard from './DeliveryHistoryCard'
 
+// REDESIGN: every function, state variable, and effect below is UNCHANGED
+// from the original -- same API calls, same socket listeners, same location
+// tracking, same OTP flow. Only the JSX layout/styling changed, plus:
+//   - todayDeliveries now holds { hourlyStats, deliveries } (matching the
+//     backend's new response shape) instead of a bare array -- the bar chart
+//     below reads .hourlyStats, which is the exact same data it always was.
+//   - A real "Completed Today" history section now renders from
+//     todayDeliveries.deliveries (real shop photo/name/address/time, from
+//     the backend enrichment).
+// No fake concurrent-deliveries list, no invented distance/ETA numbers --
+// this app can only have one active delivery at a time (see acceptOrder's
+// busyElsewhere check), so the UI honestly reflects that: one current
+// delivery, a list of ones you can accept, and real completed history.
 function DeliveryBoy() {
   const { userData, socket } = useSelector(state => state.user)
   const [currentOrder, setCurrentOrder] = useState()
   const [showOtpBox, setShowOtpBox] = useState(false)
   const [availableAssignments, setAvailableAssignments] = useState(null)
   const [otp, setOtp] = useState("")
-  const [todayDeliveries, setTodayDeliveries] = useState([])
+  const [todayDeliveries, setTodayDeliveries] = useState({ hourlyStats: [], deliveries: [] })
   const [deliveryBoyLocation, setDeliveryBoyLocation] = useState(null)
   const [loading, setLoading] = useState(false)
 
-  // NEW (room-scoped location broadcasting): a ref, not state, because the
-  // watchPosition callback below is set up once per socket/role change (see its
-  // dependency array) and reads whatever the LATEST current order is at the
-  // moment each GPS position comes in — a ref lets that happen without tearing
-  // down and re-subscribing the geolocation watch every time currentOrder
-  // changes, which would be wasteful and could cause missed position updates
-  // mid-resubscribe.
   const currentOrderIdRef = useRef(null)
 
-  // FIX (broken/incomplete function call): the original watchPosition call had its
-  // success callback, error callback, and options object separated by commas OUTSIDE
-  // the function call — `watchPosition((pos)=>{...}), (error)=>{...}, {enableHighAccuracy:true}`.
-  // Only the first argument was ever actually passed to watchPosition; the error callback
-  // and enableHighAccuracy option were dead, unreachable expressions. Also fixed a missing
-  // closing brace on the `if (navigator.geolocation)` block.
   useEffect(() => {
     if (!socket || userData.role !== "deliveryBoy") return
     let watchId
@@ -47,14 +50,6 @@ function DeliveryBoy() {
           const latitude = position.coords.latitude
           const longitude = position.coords.longitude
           setDeliveryBoyLocation({ lat: latitude, lon: longitude })
-          // FIX (privacy leak — location broadcast to everyone): orderId is new
-          // here — the server (see socket.js) now only re-broadcasts this
-          // position into a room scoped to that specific order, after verifying
-          // this delivery boy is actually assigned to it. Without an orderId the
-          // server won't broadcast at all, so this is required, not optional.
-          // `userId` is kept in the payload for backward compatibility but is no
-          // longer read server-side (socket.userId, from the verified JWT
-          // handshake, is used instead).
           socket.emit('updateLocation', {
             latitude,
             longitude,
@@ -76,10 +71,6 @@ function DeliveryBoy() {
     }
   }, [socket, userData])
 
-  // NEW: replaces the old flat "₹50 per delivery" guess with the real delivery-fee-
-  // based earnings from the new analytics endpoint. `todayDeliveries` (the hourly
-  // bar chart above) is left exactly as it was — it's a genuinely different view
-  // (delivery COUNT by hour today), not something this duplicates.
   const [analytics, setAnalytics] = useState(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(true)
 
@@ -96,9 +87,6 @@ function DeliveryBoy() {
     try {
       const result = await axios.get(`${serverUrl}/api/order/get-current-order`, { withCredentials: true })
       setCurrentOrder(result.data)
-      // Keep the ref used by the watchPosition callback in sync — this is the
-      // one place currentOrder's underlying id actually changes (a fresh
-      // delivery picked up, or null once there's no active order left).
       currentOrderIdRef.current = result.data?._id || null
     } catch (error) {
       console.log(error)
@@ -107,8 +95,6 @@ function DeliveryBoy() {
 
   const acceptOrder = async (assignmentId) => {
     try {
-      // FIX: route is now POST (see order.routes.js) — was GET, which mutates
-      // state with no CSRF protection.
       await axios.post(`${serverUrl}/api/order/accept-order/${assignmentId}`, {}, { withCredentials: true })
       toast.success("Order accepted!")
       await getCurrentOrder()
@@ -117,18 +103,6 @@ function DeliveryBoy() {
     }
   }
 
-  // NEW (real-time toast): a fresh delivery assignment just came in over the socket —
-  // surface it immediately instead of relying on the delivery boy noticing the list update
-  //
-  // FIX (crash on mount): was `socket.on(...)` / `socket.off(...)` with no optional
-  // chaining — socket starts as `null` in Redux and is only set once App.jsx's own
-  // effect creates the connection. React runs a child component's effects before
-  // its parent's within the same commit, so this effect could run with socket
-  // still null before App.jsx had a chance to set it, throwing
-  // "Cannot read properties of null (reading 'on')" on essentially every fresh
-  // page load for a delivery boy. Every other socket listener in this app
-  // (MyOrders.jsx, TrackOrderPage.jsx) already used `socket?.on(...)` — this one
-  // just hadn't been brought in line with that pattern yet.
   useEffect(() => {
     socket?.on('newAssignment', (data) => {
       setAvailableAssignments(prev => ([...prev, data]))
@@ -159,7 +133,6 @@ function DeliveryBoy() {
         orderId: currentOrder._id, shopOrderId: currentOrder.shopOrder._id, otp
       }, { withCredentials: true })
       toast.success(result.data.message || "Order delivered successfully!")
-      // small delay so the toast is actually visible before the page reloads
       setTimeout(() => location.reload(), 800)
     } catch (error) {
       toast.error(getErrorMessage(error))
@@ -175,7 +148,6 @@ function DeliveryBoy() {
     }
   }
 
-  // NEW: fetches real earnings analytics (delivery fee only, never the food cost)
   const getDeliveryAnalytics = async () => {
     setAnalyticsLoading(true)
     try {
@@ -195,124 +167,181 @@ function DeliveryBoy() {
     getDeliveryAnalytics()
   }, [userData])
 
+  const hour = new Date().getHours()
+  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"
+
   return (
-    <div className='w-screen min-h-screen flex flex-col gap-5 items-center bg-[#fff9f6] overflow-y-auto'>
+    <div className='w-full min-h-screen bg-[#FAFAF9] pt-[8px]'>
       <Nav />
-      <div className='w-full max-w-[800px] flex flex-col gap-5 items-center'>
-        <div className='bg-white rounded-2xl shadow-md p-5 flex flex-col justify-start items-center w-[90%] border border-orange-100 text-center gap-2'>
-          <h1 className='text-xl font-bold text-[#ff4d2d]'>Welcome, {userData.fullName}</h1>
-          <p className='text-[#ff4d2d] '><span className='font-semibold'>Latitude:</span> {deliveryBoyLocation?.lat}, <span className='font-semibold'>Longitude:</span> {deliveryBoyLocation?.lon}</p>
+
+      <div className='max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-2'>
+
+        <h1 className='text-2xl font-bold text-[#18181B]'>{greeting}, {userData.fullName}! &#128075;</h1>
+        <p className='text-sm text-[#71717A] mt-1'>Here's your delivery overview for today.</p>
+
+        {/* STAT CARDS -- real numbers only: today's delivery count (from the
+            hourly stats total), completed count, and real earnings analytics. */}
+        <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-4'>
+          <StatCard
+            icon={<Package size={18} className='text-[#FF4B2B]' />}
+            iconBg="#FFF1ED"
+            title="Today's Deliveries"
+            value={todayDeliveries.hourlyStats.reduce((sum, s) => sum + s.count, 0)}
+          />
+          <StatCard
+            icon={<CheckCircle2 size={18} className='text-[#16A34A]' />}
+            iconBg="#F0FDF4"
+            title="Completed"
+            value={analytics?.summary.completedDeliveries ?? 0}
+          />
+          <StatCard
+            icon={<Wallet size={18} className='text-[#3B82F6]' />}
+            iconBg="#EFF6FF"
+            title="Today's Earnings"
+            value={`\u20B9${analytics?.summary.todayEarnings ?? 0}`}
+          />
         </div>
 
-        <div className='bg-white rounded-2xl shadow-md p-5 w-[90%] mb-6 border border-orange-100'>
-          <h1 className='text-lg font-bold mb-3 text-[#ff4d2d] '>Today Deliveries</h1>
+        <div className='grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6 mt-8'>
 
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={todayDeliveries}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="hour" tickFormatter={(h) => `${h}:00`} />
-              <YAxis allowDecimals={false} />
-              <Tooltip formatter={(value) => [value, "orders"]} labelFormatter={label => `${label}:00`} />
-              <Bar dataKey="count" fill='#ff4d2d' />
-            </BarChart>
-          </ResponsiveContainer>
-
-        </div>
-
-        {/* NEW: real earnings analytics — delivery fee only, never food cost */}
-        <div className='bg-white rounded-2xl shadow-md p-5 w-[90%] mb-6 border border-orange-100'>
-          <h1 className='text-lg font-bold mb-4 text-[#ff4d2d]'>Earnings</h1>
-
-          {analyticsLoading ? (
-            <div className='flex flex-col items-center justify-center py-10'>
-              <div className='w-8 h-8 border-4 border-[#ff4d2d] border-t-transparent rounded-full animate-spin mb-3' />
-              <p className='text-gray-500 text-sm'>Loading earnings...</p>
-            </div>
-          ) : !analytics || analytics.summary.completedDeliveries === 0 ? (
-            <div className='flex flex-col items-center justify-center py-10 text-center'>
-              <p className='text-gray-500 text-sm'>No deliveries completed today yet.</p>
-            </div>
-          ) : (
-            <>
-              <div className='grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6'>
-                <div className='bg-[#fff9f6] border border-orange-100 rounded-xl p-3 flex flex-col gap-1'>
-                  <div className='text-[#ff4d2d] text-sm'><FaWallet /></div>
-                  <div className='text-lg font-bold text-gray-800'>₹{analytics.summary.todayEarnings}</div>
-                  <div className='text-xs text-gray-500'>Today's Earnings</div>
+          {/* LEFT: current delivery (map + actions) OR available orders to accept */}
+          <div className='flex flex-col gap-6'>
+            {currentOrder ? (
+              <div className='rounded-2xl border border-zinc-200 bg-white p-5'>
+                <div className='flex items-center justify-between mb-4'>
+                  <h2 className='font-semibold text-[#18181B]'>Active Delivery</h2>
+                  <span className='text-xs font-medium px-2.5 py-1 rounded-full bg-[#FFF1ED] text-[#FF4B2B]'>Out for delivery</span>
                 </div>
-                <div className='bg-[#fff9f6] border border-orange-100 rounded-xl p-3 flex flex-col gap-1'>
-                  <div className='text-[#ff4d2d] text-sm'><FaBoxOpen /></div>
-                  <div className='text-lg font-bold text-gray-800'>{analytics.summary.completedDeliveries}</div>
-                  <div className='text-xs text-gray-500'>Completed Deliveries</div>
+                <p className='text-sm font-semibold text-[#18181B]'>{currentOrder?.shopOrder.shop.name}</p>
+                <p className='text-xs text-[#71717A] mt-0.5'>{currentOrder.shopOrder.shopOrderItems.length} items &middot; &#8377;{currentOrder.shopOrder.subtotal}</p>
+
+                <div className='mt-4'>
+                  <DeliveryBoyTracking data={{
+                    deliveryBoyLocation: deliveryBoyLocation || {
+                      lat: userData.location.coordinates[1],
+                      lon: userData.location.coordinates[0]
+                    },
+                    customerLocation: {
+                      lat: currentOrder.deliveryAddress.latitude,
+                      lon: currentOrder.deliveryAddress.longitude
+                    }
+                  }} />
                 </div>
-                <div className='bg-[#fff9f6] border border-orange-100 rounded-xl p-3 flex flex-col gap-1'>
-                  <div className='text-[#ff4d2d] text-sm'><FaChartLine /></div>
-                  <div className='text-lg font-bold text-gray-800'>₹{analytics.summary.averageEarningPerDelivery}</div>
-                  <div className='text-xs text-gray-500'>Avg. per Delivery</div>
+
+                {!showOtpBox ? (
+                  <button
+                    className='mt-5 w-full bg-[#16A34A] hover:bg-[#15803D] text-white font-semibold h-12 rounded-xl transition-colors active:scale-[0.98]'
+                    onClick={sendOtp}
+                    disabled={loading}
+                  >
+                    {loading ? <ClipLoader size={20} color='white' /> : "Mark as Delivered"}
+                  </button>
+                ) : (
+                  <div className='mt-5 p-4 border border-zinc-200 rounded-xl bg-[#FAFAF9]'>
+                    <p className='text-sm font-medium mb-2 text-[#18181B]'>Enter OTP sent to <span className='text-[#FF4B2B]'>{currentOrder.user.fullName}</span></p>
+                    <input type="text" className='w-full border border-zinc-200 px-3 py-2 rounded-xl mb-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF4B2B]/30 focus:border-[#FF4B2B]' placeholder='Enter OTP' onChange={(e) => setOtp(e.target.value)} value={otp} />
+                    <button className="w-full bg-[#FF4B2B] hover:bg-[#E94426] text-white h-11 rounded-xl font-semibold transition-colors active:scale-[0.98]" onClick={verifyOtp}>Submit OTP</button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className='rounded-2xl border border-zinc-200 bg-white p-5'>
+                <h2 className='font-semibold text-[#18181B] mb-4'>Available Orders</h2>
+                <div className='flex flex-col gap-3'>
+                  {availableAssignments?.length > 0 ? (
+                    availableAssignments.map((a, index) => (
+                      <AvailableOrderCard key={index} assignment={a} onAccept={acceptOrder} />
+                    ))
+                  ) : (
+                    <p className='text-sm text-[#A1A1AA] py-6 text-center'>No available orders right now</p>
+                  )}
                 </div>
               </div>
+            )}
 
-              <h2 className='text-sm font-semibold text-gray-700 mb-2'>Earnings Over Time (Last 7 Days)</h2>
-              <ResponsiveContainer width="100%" height={200}>
-                <LineChart data={analytics.earningsOverTime}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" tickFormatter={(d) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} fontSize={12} />
-                  <YAxis fontSize={12} />
-                  <Tooltip formatter={(value) => [`₹${value}`, "Earnings"]} labelFormatter={(d) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} />
-                  <Line type="monotone" dataKey="earnings" stroke="#ff4d2d" strokeWidth={2} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </>
-          )}
-        </div>
+            {/* COMPLETED TODAY -- real history, real shop photo, real time/date */}
+            <div className='rounded-2xl border border-zinc-200 bg-white p-5'>
+              <h2 className='font-semibold text-[#18181B] mb-4'>Completed Today</h2>
+              <div className='flex flex-col gap-3'>
+                {todayDeliveries.deliveries?.length > 0 ? (
+                  todayDeliveries.deliveries.map((d, index) => (
+                    <DeliveryHistoryCard key={index} delivery={d} />
+                  ))
+                ) : (
+                  <p className='text-sm text-[#A1A1AA] py-6 text-center'>No deliveries completed yet today</p>
+                )}
+              </div>
+            </div>
+          </div>
 
-        {!currentOrder && <div className='bg-white rounded-2xl p-5 shadow-md w-[90%] border border-orange-100'>
-          <h1 className='text-lg font-bold mb-4 flex items-center gap-2'>Available Orders</h1>
-
-          <div className='space-y-4'>
-            {availableAssignments?.length > 0
-              ? (
-                availableAssignments.map((a, index) => (
-                  <div className='border rounded-lg p-4 flex justify-between items-center' key={index}>
-                    <div>
-                      <p className='text-sm font-semibold'>{a?.shopName}</p>
-                      <p className='text-sm text-gray-500'><span className='font-semibold'>Delivery Address:</span> {a?.deliveryAddress.text}</p>
-                      <p className='text-xs text-gray-400'>{a.items.length} items | {a.subtotal}</p>
-                    </div>
-                    <button className='bg-orange-500 text-white px-4 py-1 rounded-lg text-sm hover:bg-orange-600' onClick={() => acceptOrder(a.assignmentId)}>Accept</button>
+          {/* RIGHT: customer card (when there's an active delivery) + earnings */}
+          <div className='flex flex-col gap-6'>
+            {currentOrder && (
+              <div className='rounded-2xl border border-zinc-200 bg-white p-5'>
+                <h2 className='font-semibold text-[#18181B] mb-3'>Customer</h2>
+                <div className='flex items-center gap-3'>
+                  <div className='w-9 h-9 rounded-full bg-[#FFF1ED] flex items-center justify-center shrink-0'>
+                    <UserIcon size={16} className='text-[#FF4B2B]' />
                   </div>
-                ))
-              ) : <p className='text-gray-400 text-sm'>No Available Orders</p>}
+                  <div className='min-w-0'>
+                    <p className='text-sm font-semibold text-[#18181B] truncate'>{currentOrder.user.fullName}</p>
+                    <p className='text-xs text-[#71717A]'>{currentOrder.user.mobile}</p>
+                  </div>
+                </div>
+                <div className='flex items-start gap-2 mt-3 pt-3 border-t border-zinc-100'>
+                  <MapPin size={14} className='text-[#A1A1AA] shrink-0 mt-0.5' />
+                  <p className='text-xs text-[#71717A]'>{currentOrder.deliveryAddress.text}</p>
+                </div>
+                {currentOrder.user.mobile && (
+                  <a href={`tel:${currentOrder.user.mobile}`} className='mt-4 w-full flex items-center justify-center gap-2 bg-[#FFF1ED] text-[#FF4B2B] h-10 rounded-xl text-sm font-semibold hover:bg-[#FFE4DC] transition-colors'>
+                    <Phone size={14} /> Call Customer
+                  </a>
+                )}
+              </div>
+            )}
+
+            <div className='rounded-2xl border border-zinc-200 bg-white p-5'>
+              <h2 className='font-semibold text-[#18181B] mb-4'>Earnings</h2>
+              {analyticsLoading ? (
+                <div className='flex flex-col items-center justify-center py-8'>
+                  <div className='w-6 h-6 border-[3px] border-[#FF4B2B] border-t-transparent rounded-full animate-spin mb-3' />
+                  <p className='text-[#A1A1AA] text-xs'>Loading earnings...</p>
+                </div>
+              ) : !analytics || analytics.summary.completedDeliveries === 0 ? (
+                <p className='text-sm text-[#A1A1AA] py-6 text-center'>No deliveries completed today yet.</p>
+              ) : (
+                <>
+                  <div className='flex items-center gap-2 mb-4'>
+                    <TrendingUp size={14} className='text-[#3B82F6]' />
+                    <span className='text-xs text-[#71717A]'>Avg &#8377;{analytics.summary.averageEarningPerDelivery} per delivery</span>
+                  </div>
+                  <ResponsiveContainer width="100%" height={160}>
+                    <LineChart data={analytics.earningsOverTime}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#E4E4E7" />
+                      <XAxis dataKey="date" tickFormatter={(d) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} fontSize={11} stroke="#A1A1AA" />
+                      <YAxis fontSize={11} stroke="#A1A1AA" />
+                      <Tooltip formatter={(value) => [`\u20B9${value}`, "Earnings"]} labelFormatter={(d) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} />
+                      <Line type="monotone" dataKey="earnings" stroke="#FF4B2B" strokeWidth={2} dot={{ r: 3 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </>
+              )}
+            </div>
+
+            <div className='rounded-2xl border border-zinc-200 bg-white p-5'>
+              <h2 className='font-semibold text-[#18181B] mb-4'>Deliveries by Hour</h2>
+              <ResponsiveContainer width="100%" height={160}>
+                <BarChart data={todayDeliveries.hourlyStats}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E4E4E7" />
+                  <XAxis dataKey="hour" tickFormatter={(h) => `${h}:00`} fontSize={11} stroke="#A1A1AA" />
+                  <YAxis allowDecimals={false} fontSize={11} stroke="#A1A1AA" />
+                  <Tooltip formatter={(value) => [value, "orders"]} labelFormatter={label => `${label}:00`} />
+                  <Bar dataKey="count" fill='#FF4B2B' radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </div>
-        </div>}
-
-        {currentOrder && <div className='bg-white rounded-2xl p-5 shadow-md w-[90%] border border-orange-100'>
-          <h2 className='text-lg font-bold mb-3'>📦Current Order</h2>
-          <div className='border rounded-lg p-4 mb-3'>
-            <p className='font-semibold text-sm'>{currentOrder?.shopOrder.shop.name}</p>
-            <p className='text-sm text-gray-500'>{currentOrder.deliveryAddress.text}</p>
-            <p className='text-xs text-gray-400'>{currentOrder.shopOrder.shopOrderItems.length} items | {currentOrder.shopOrder.subtotal}</p>
-          </div>
-
-          <DeliveryBoyTracking data={{
-            deliveryBoyLocation: deliveryBoyLocation || {
-              lat: userData.location.coordinates[1],
-              lon: userData.location.coordinates[0]
-            },
-            customerLocation: {
-              lat: currentOrder.deliveryAddress.latitude,
-              lon: currentOrder.deliveryAddress.longitude
-            }
-          }} />
-          {!showOtpBox ? <button className='mt-4 w-full bg-green-500 text-white font-semibold py-2 px-4 rounded-xl shadow-md hover:bg-green-600 active:scale-95 transition-all duration-200' onClick={sendOtp} disabled={loading}>
-            {loading ? <ClipLoader size={20} color='white' /> : "Mark As Delivered"}
-          </button> : <div className='mt-4 p-4 border rounded-xl bg-gray-50'>
-            <p className='text-sm font-semibold mb-2'>Enter Otp send to <span className='text-orange-500'>{currentOrder.user.fullName}</span></p>
-            <input type="text" className='w-full border px-3 py-2 rounded-lg mb-3 focus:outline-none focus:ring-2 focus:ring-orange-400' placeholder='Enter OTP' onChange={(e) => setOtp(e.target.value)} value={otp} />
-
-            <button className="w-full bg-orange-500 text-white py-2 rounded-lg font-semibold hover:bg-orange-600 transition-all" onClick={verifyOtp}>Submit OTP</button>
-          </div>}
-        </div>}
+        </div>
       </div>
     </div>
   )

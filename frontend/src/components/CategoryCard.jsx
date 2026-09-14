@@ -1,14 +1,31 @@
 import React from 'react'
 
-function CategoryCard({name,image,onClick}) {
-  return (
-    <div className='w-[120px] h-[120px] md:w-[180px] md:h-[180px] rounded-2xl border-2 border-[#ff4d2d] shrink-0 overflow-hidden bg-white shadow-xl shadow-gray-200 hover:shadow-lg transition-shadow relative' onClick={onClick}>
-     <img src={image} alt="" className=' w-full h-full object-cover transform hover:scale-110 transition-transform duration-300'/>
-     <div className='absolute  bottom-0 w-full left-0  bg-[#ffffff96] bg-opacity-95 px-3 py-1 rounded-t-xl text-center shadow text-sm font-medium text-gray-800 backdrop-blur'>
-{name}
-     </div>
-    </div>
-  )
+// REDESIGN: sized down to the 64-72px compact circular treatment from the
+// reference (previously 76-92px). Deliberately kept as a horizontal-scroll
+// carousel at every screen size, not a wrapping grid -- this is an
+// intentional pattern (same as Netflix/Amazon/Swiggy's own category rows),
+// not a mobile-only fallback.
+function CategoryCard({ name, image, onClick, active = false }) {
+    return (
+        <button
+            onClick={onClick}
+            className='flex flex-col items-center gap-1.5 shrink-0 group focus:outline-none'
+        >
+            <div
+                className={`w-16 h-16 md:w-[72px] md:h-[72px] rounded-full overflow-hidden bg-white transition-all duration-200
+          ${active ? 'ring-2 ring-[#FF4B2B] ring-offset-2' : 'ring-1 ring-zinc-100 group-hover:ring-[#FF4B2B]/40'}`}
+            >
+                <img
+                    src={image}
+                    alt={name}
+                    className='w-full h-full object-cover transition-transform duration-300 group-hover:scale-110'
+                />
+            </div>
+            <span className={`text-xs font-medium transition-colors ${active ? 'text-[#FF4B2B]' : 'text-zinc-600 group-hover:text-zinc-900'}`}>
+                {name}
+            </span>
+        </button>
+    )
 }
 
 export default CategoryCard

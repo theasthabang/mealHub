@@ -3,7 +3,7 @@ import rateLimit from "express-rate-limit"
 import RedisStore from "rate-limit-redis"
 import { googleAuth, resetPassword, sendCheckoutOtp, sendOtp, setMobileWithoutOtp, signIn, signOut, signUp, verifyCheckoutOtp, verifyOtp } from "../controllers/auth.controllers.js"
 import isAuth from "../middlewares/isAuth.js"
-import redisClient from "../utils/redisClient.js"
+import redisClient, { failOpen } from "../utils/redisClient.js"
 import { validate } from "../middlewares/validate.js"
 import { signUpSchema, signInSchema, sendOtpSchema, verifyOtpSchema, resetPasswordSchema, googleAuthSchema } from "../validators/authValidators.js"
 
@@ -15,7 +15,12 @@ const authRouter = express.Router()
 // hook rate-limit-redis uses to actually talk to Redis through our shared
 // client; `prefix` keeps auth's counters in their own namespace, separate from
 // the delivery-OTP limiters in order.routes.js sharing the same Redis database.
-const authLimiter = rateLimit({
+//
+// FIX (real incident): wrapped in failOpen — a Redis timeout during the
+// rate-limit check previously took down /api/auth/signin entirely. See
+// redisClient.js for the full reasoning; short version: a login route
+// shouldn't go down because a secondary service had one slow moment.
+const authLimiter = failOpen(rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 20,
     message: { message: "Too many attempts. Please try again in 15 minutes." },
@@ -25,9 +30,9 @@ const authLimiter = rateLimit({
         sendCommand: (...args) => redisClient.sendCommand(args),
         prefix: "rl:auth:"
     })
-})
+}))
 
-const otpLimiter = rateLimit({
+const otpLimiter = failOpen(rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 5,
     message: { message: "Too many OTP requests. Please try again in 15 minutes." },
@@ -37,7 +42,7 @@ const otpLimiter = rateLimit({
         sendCommand: (...args) => redisClient.sendCommand(args),
         prefix: "rl:otp:"
     })
-})
+}))
 
 // NEW (production hardening — input validation): each route now validates its
 // body against a Zod schema before the controller ever runs. This replaces

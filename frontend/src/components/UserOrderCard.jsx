@@ -6,6 +6,7 @@ import toast from 'react-hot-toast'
 import { serverUrl } from '../App'
 import { cancelOrderStatus, setItemRating } from '../redux/userSlice'
 import { getErrorMessage } from '../utils/getErrorMessage'
+import { IoCheckmarkCircle } from "react-icons/io5"
 
 // NEW: shown as a dropdown when the customer starts the cancel flow
 const CANCEL_REASONS = [
@@ -70,7 +71,8 @@ function UserOrderCard({ data }) {
                 shopId,
                 cancelReason,
                 refundAmount: result.data.refund?.amount,
-                refundStatus: result.data.refund?.status
+                refundStatus: result.data.refund?.status,
+                refundedAt: result.data.refund?.refundedAt
             }))
 
             if (result.data.refund) {
@@ -202,15 +204,26 @@ function UserOrderCard({ data }) {
                     {shopOrder.status == "cancelled" && shopOrder.cancelReason && (
                         <p className='text-xs text-gray-500'>Reason: {shopOrder.cancelReason}</p>
                     )}
-                    {/* NEW: persistent refund confirmation — this is what makes
-                        the refund trackable/checkable anytime, not just a toast
-                        that disappears after a few seconds. Only shown when a
-                        real refund actually happened (COD/unpaid cancellations
-                        have no refundAmount, so this stays hidden for those). */}
+                    {/* Persistent, genuinely visible refund confirmation — this is
+                        what makes the refund trackable anytime the customer
+                        reopens their order list, not just a toast that flashes
+                        and disappears. Only shown when a real refund actually
+                        happened; COD/unpaid cancellations have no refundAmount,
+                        so this stays hidden for those. */}
                     {shopOrder.status == "cancelled" && shopOrder.refundAmount && (
-                        <p className='text-xs font-medium text-green-600 mt-1'>
-                            ✓ Refund of ₹{shopOrder.refundAmount} processed successfully
-                        </p>
+                        <div className='mt-2 flex items-start gap-2.5 bg-green-50 border border-green-200 rounded-lg px-3 py-2.5'>
+                            <IoCheckmarkCircle className='text-green-600 shrink-0 mt-0.5' size={20} />
+                            <div>
+                                <p className='text-sm font-semibold text-green-700'>
+                                    Refund successful — ₹{shopOrder.refundAmount}
+                                </p>
+                                {shopOrder.refundedAt && (
+                                    <p className='text-xs text-green-600 mt-0.5'>
+                                        Refunded on {new Date(shopOrder.refundedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} to your original payment method
+                                    </p>
+                                )}
+                            </div>
+                        </div>
                     )}
                 </div>
             ))}

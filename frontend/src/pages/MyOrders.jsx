@@ -55,15 +55,23 @@ function MyOrders() {
     // FIX (stray leading quote): className was '"w-full min-h-screen bg-[#fff9f6] flex
     // justify-center px-4' — a literal " created a bogus, non-existent class with no
     // visual effect, but it's sloppy and worth cleaning up.
+    // FIX (desktop UX — layout was mobile-width stretched onto every screen):
+    // this used to be a hard max-w-[800px], meaning a wide laptop/desktop
+    // browser just centered a narrow column with large empty margins on both
+    // sides — using none of the extra screen space. Now the container itself
+    // grows at larger breakpoints, AND the order list switches from a single
+    // vertical stack to a genuine 2-column grid from the lg breakpoint up, so
+    // a desktop view actually looks like a desktop layout, not a phone screen
+    // with padding added.
     <div className='w-full min-h-screen bg-[#fff9f6] flex justify-center px-4'>
-      <div className='w-full max-w-[800px] p-4'>
+      <div className='w-full max-w-[800px] lg:max-w-5xl xl:max-w-6xl p-4'>
         <div className='flex items-center gap-[20px] mb-6 '>
           <div className=' z-[10] ' onClick={() => navigate("/")}>
             <IoIosArrowRoundBack size={35} className='text-[#ff4d2d]' />
           </div>
           <h1 className='text-2xl font-bold  text-start'>My Orders</h1>
         </div>
-        <div className='space-y-6'>
+        <div className={myOrdersLoading || myOrders?.length === 0 ? '' : 'grid grid-cols-1 lg:grid-cols-2 gap-6'}>
           {/* NEW (loading-state fix): loading is now checked FIRST, before deciding
               whether to show the empty-state message — this is what stops the false
               "no orders yet" flash while the real data is still on its way. */}

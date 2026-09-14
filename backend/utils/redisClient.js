@@ -37,3 +37,29 @@ redisClient.connect()
     .catch((err) => console.error("Redis connection failed:", err.message))
 
 export default redisClient
+
+// FIX (real outage hit tonight): a Redis rate-limit check timing out was
+// enough to make /api/auth/signin fail entirely — a login feature going down
+// because a SECONDARY service (Redis) had one slow moment is the wrong
+// tradeoff. This wraps a rate-limit middleware so that if its store throws
+// (any Redis error — timeout, brief disconnect, whatever), the request is
+// let through instead of blocked. A temporary gap in rate-limiting during a
+// rare Redis hiccup is a far smaller risk than the login system itself going
+// down because of it.
+//
+// Implemented at the Express middleware layer rather than by faking a
+// specific Redis command's return value — express-rate-limit calls next(err)
+// with the real error when its store fails (confirmed: this is exactly what
+// reached the global error handler during tonight's incident), so catching
+// that error here and calling next() with no error is the correct,
+// well-defined point to intervene, without needing to guess or replicate
+// Redis's internal command semantics.
+export const failOpen = (limiter) => (req, res, next) => {
+    limiter(req, res, (err) => {
+        if (err) {
+            console.error("Rate limiter store failed — failing open (request allowed through):", err.message)
+            return next()
+        }
+        next()
+    })
+}

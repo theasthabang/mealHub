@@ -13,6 +13,7 @@ import dotenv from "dotenv"
 import { count } from "console"
 import pgPool from "../utils/postgres.js"
 import PaymentOutbox from "../models/paymentOutbox.model.js"
+import { computeShopOrderDiscount } from "../utils/offerHelpers.js"
 import { publishOutboxEntry } from "../utils/outboxPublisher.js"
 import logger from "../utils/logger.js"
 
@@ -151,10 +152,22 @@ export const placeOrder = async (req, res) => {
                 }
             })
 
+            // NEW: real offer discount, computed entirely server-side from
+            // this shop's currently-active Offer records and the tamper-proof
+            // shopOrderItems/subtotal above — never from anything the client
+            // sends. `subtotal` below becomes the actual amount owed (existing
+            // meaning, preserved for refunds/analytics elsewhere);
+            // `originalSubtotal` keeps the pre-discount figure for display.
+            const { discountAmount, appliedOffers } = await computeShopOrderDiscount(shop._id, shopOrderItems, subtotal)
+            const finalSubtotal = Math.round((subtotal - discountAmount) * 100) / 100
+
             return {
                 shop: shop._id,
                 owner: shop.owner._id,
-                subtotal,
+                subtotal: finalSubtotal,
+                originalSubtotal: subtotal,
+                discountAmount,
+                appliedOffers,
                 shopOrderItems
             }
         }
@@ -273,6 +286,23 @@ export const verifyPayment = async (req, res) => {
             return res.status(403).json({ message: "not authorized for this order" })
         }
 
+        // FIX (deployment audit — edge case found in review, not yet hit in
+        // practice): if a customer takes long enough completing checkout that
+        // staleOrderCleanup auto-cancels this order in the background before
+        // they finish paying, Razorpay can still capture the payment
+        // afterward — real money moves, but blindly marking this order
+        // "paid" would leave it in a contradictory state: cancelled (with a
+        // now-false "payment was not completed in time" reason) AND paid,
+        // with nothing surfacing that a refund is actually owed. Still
+        // record the payment in the ledger below — the money genuinely
+        // moved and needs to be tracked regardless of order status — but
+        // this response tells the customer plainly what happened instead of
+        // pretending their order proceeded normally.
+        const allShopOrdersCancelled = order.shopOrders.every(so => so.status === "cancelled")
+        if (allShopOrdersCancelled) {
+            logger.error({ orderId: order._id, razorpay_payment_id }, "Payment captured for an order that was already auto-cancelled before payment completed — needs manual refund review")
+        }
+
         // FIX (Outbox Pattern — replaces the previous direct try/catch write):
         // the old version updated MongoDB, THEN separately tried writing to
         // Postgres in a try/catch that just logged and moved on if it failed —
@@ -328,6 +358,21 @@ export const verifyPayment = async (req, res) => {
         await order.populate("shopOrders.shop", "name")
         await order.populate("shopOrders.owner", "name socketId")
         await order.populate("user", "name email mobile")
+
+        // See the allShopOrdersCancelled check above — the payment is now
+        // safely recorded in the ledger either way, but if the order was
+        // already cancelled before this payment came through, it should
+        // never look like a normal successful order to the owner (no
+        // 'newOrder' notification for something that isn't actually going
+        // to be fulfilled) or to the customer (no "order placed!" messaging
+        // for an order that's already cancelled).
+        if (allShopOrdersCancelled) {
+            return res.status(200).json({
+                message: "Your order was cancelled before payment could be confirmed, but your payment was captured successfully. Our support team will process a refund shortly — please keep this reference handy.",
+                paymentReference: razorpay_payment_id,
+                order
+            })
+        }
 
         const io = req.app.get('io')
 
@@ -725,6 +770,7 @@ export const cancelOrderItem = async (req, res) => {
         if (refundResult) {
             shopOrder.refundAmount = shopOrder.subtotal
             shopOrder.refundStatus = refundResult.status
+            shopOrder.refundedAt = new Date()
         }
 
         await order.save()
@@ -749,7 +795,7 @@ export const cancelOrderItem = async (req, res) => {
         return res.status(200).json({
             message: refundResult ? "order cancelled and refund initiated" : "order cancelled successfully",
             shopOrder: updatedShopOrder,
-            refund: refundResult ? { id: refundResult.id, amount: shopOrder.subtotal, status: refundResult.status } : null
+            refund: refundResult ? { id: refundResult.id, amount: shopOrder.subtotal, status: refundResult.status, refundedAt: shopOrder.refundedAt } : null
         })
 
     } catch (error) {
@@ -1146,11 +1192,18 @@ export const getTodayDeliveries=async (req,res) => {
         const startsOfDay=new Date()
         startsOfDay.setHours(0,0,0,0)
 
+        // NEW: .populate() added so the delivery-history list below can show a
+        // real shop name/photo AND a real customer name/mobile — previously
+        // this query only needed shop as a bare ObjectId and never touched
+        // user at all, since the only consumer was the hourly-count chart.
         const orders=await Order.find({
            "shopOrders.assignedDeliveryBoy":deliveryBoyId,
            "shopOrders.status":"delivered",
            "shopOrders.deliveredAt":{$gte:startsOfDay}
-        }).lean()
+        })
+        .populate("shopOrders.shop", "name image")
+        .populate("user", "fullName mobile")
+        .lean()
 
      let todaysDeliveries=[] 
      
@@ -1161,7 +1214,11 @@ export const getTodayDeliveries=async (req,res) => {
                 shopOrder.deliveredAt &&
                 shopOrder.deliveredAt>=startsOfDay
             ){
-                todaysDeliveries.push(shopOrder)
+                // NEW: attach the parent order's id and delivery address onto
+                // each shopOrder before pushing it — shopOrder itself has no
+                // reference back to its parent Order or the customer's address,
+                // both of which the frontend history list actually needs.
+                todaysDeliveries.push({ ...shopOrder, orderId: order._id, deliveryAddress: order.deliveryAddress, customer: order.user })
             }
         })
      })
@@ -1180,7 +1237,26 @@ let formattedStats=Object.keys(stats).map(hour=>({
 
 formattedStats.sort((a,b)=>a.hour-b.hour)
 
-return res.status(200).json(formattedStats)
+// NEW: real delivery-by-delivery detail — shop name/photo (from the populate
+// above), item count, subtotal, delivery address, and the exact delivered
+// timestamp. This is what the redesigned delivery-history UI reads from;
+// hourlyStats (below) is the exact same aggregate the bar chart already used,
+// completely unchanged, so nothing that already depends on it breaks.
+const deliveryDetails = todaysDeliveries
+    .sort((a, b) => new Date(b.deliveredAt) - new Date(a.deliveredAt))
+    .map(shopOrder => ({
+        orderId: shopOrder.orderId,
+        shopName: shopOrder.shop?.name || "Shop",
+        shopImage: shopOrder.shop?.image || null,
+        customerName: shopOrder.customer?.fullName || "Customer",
+        customerMobile: shopOrder.customer?.mobile || "",
+        deliveryAddress: shopOrder.deliveryAddress?.text || "",
+        deliveredAt: shopOrder.deliveredAt,
+        itemCount: shopOrder.shopOrderItems?.length || 0,
+        subtotal: shopOrder.subtotal
+    }))
+
+return res.status(200).json({ hourlyStats: formattedStats, deliveries: deliveryDetails })
   
 
     } catch (error) {

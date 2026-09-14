@@ -32,7 +32,28 @@ const shopOrderSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: "User"
     },
+    // NEW: `subtotal` keeps its EXISTING meaning throughout this app — the
+    // real, actually-owed amount for this shop's portion, AFTER any discount.
+    // This is deliberate: refund logic (cancelOrderItem), owner revenue
+    // analytics, and everything else already reads shopOrder.subtotal
+    // expecting "what was actually charged" — keeping that meaning intact
+    // means none of that existing, already-correct logic needs to change.
+    // `originalSubtotal`/`discountAmount`/`appliedOffers` exist purely so the
+    // discount is visible and auditable, not to change what subtotal means.
     subtotal: Number,
+    originalSubtotal: {
+        type: Number,
+        default: null
+    },
+    discountAmount: {
+        type: Number,
+        default: 0
+    },
+    appliedOffers: [{
+        offer: { type: mongoose.Schema.Types.ObjectId, ref: "Offer" },
+        title: String,
+        amount: Number
+    }],
     shopOrderItems: [shopOrderItemSchema],
     // FIX (Phase 1): added "cancelled" — required for the cancelOrderItem feature.
     // Without this, order.save() throws a Mongoose validation error the moment
@@ -106,6 +127,10 @@ refundAmount:{
 },
 refundStatus:{
     type:String,
+    default:null
+},
+refundedAt:{
+    type:Date,
     default:null
 }
 

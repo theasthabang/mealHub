@@ -14,6 +14,12 @@ const customerIcon = new L.Icon({
     iconSize: [40, 40],
     iconAnchor: [20, 40]
 })
+
+// REDESIGN: same map logic exactly (markers, polyline, center calculation,
+// icons) -- only the container sizing/styling changed, per spec: taller on
+// desktop, rounded-2xl, overflow-hidden. Existing zoom controls and
+// interactions are untouched (they're Leaflet defaults, not something this
+// component controls directly).
 function DeliveryBoyTracking({ data }) {
 
     const deliveryBoyLat = data.deliveryBoyLocation.lat
@@ -29,7 +35,7 @@ function DeliveryBoyTracking({ data }) {
     const center = [deliveryBoyLat, deliveryBoylon]
 
     return (
-        <div className='w-full h-[400px] mt-3 rounded-xl overflow-hidden shadow-md'>
+        <div className='w-full h-[320px] lg:h-[520px] rounded-2xl overflow-hidden border border-zinc-200'>
             <MapContainer
                 className={"w-full h-full"}
                 center={center}
@@ -39,15 +45,14 @@ function DeliveryBoyTracking({ data }) {
                     attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                     url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
-             <Marker position={[deliveryBoyLat,deliveryBoylon]} icon={deliveryBoyIcon}>
-             <Popup>Delivery Boy</Popup>
-             </Marker>
-              <Marker position={[customerLat,customerlon]} icon={customerIcon}>
-             <Popup>Delivery Address</Popup>
-             </Marker>
+                <Marker position={[deliveryBoyLat, deliveryBoylon]} icon={deliveryBoyIcon}>
+                    <Popup>Delivery Boy</Popup>
+                </Marker>
+                <Marker position={[customerLat, customerlon]} icon={customerIcon}>
+                    <Popup>Delivery Address</Popup>
+                </Marker>
 
-
-<Polyline positions={path} color='blue' weight={4}/>
+                <Polyline positions={path} color='#FF4B2B' weight={4} />
 
             </MapContainer>
         </div>

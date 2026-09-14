@@ -15,10 +15,11 @@ import mongoose from "mongoose"
 import itemRouter from "./routes/item.routes.js"
 import shopRouter from "./routes/shop.routes.js"
 import orderRouter from "./routes/order.routes.js"
+import offerRouter from "./routes/offer.routes.js"
 import http from "http"
 import { Server } from "socket.io"
 import { socketHandler } from "./socket.js"
-import redisClient from "./utils/redisClient.js"
+import redisClient, { failOpen } from "./utils/redisClient.js"
 import logger from "./utils/logger.js"
 import { startOutboxSweeper, stopOutboxSweeper } from "./utils/outboxPublisher.js"
 import { startStaleOrderCleanup, stopStaleOrderCleanup } from "./utils/staleOrderCleanup.js"
@@ -78,7 +79,7 @@ app.use(cookieParser())
 // abuse. This is deliberately looser (100 requests/15min per IP) than the auth
 // limiters, since it's meant to catch abusive volume, not normal browsing. Shares
 // the same Redis connection as the other limiters, in its own namespace.
-const globalApiLimiter = rateLimit({
+const globalApiLimiter = failOpen(rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,
     message: { message: "Too many requests. Please slow down and try again shortly." },
@@ -88,7 +89,7 @@ const globalApiLimiter = rateLimit({
         sendCommand: (...args) => redisClient.sendCommand(args),
         prefix: "rl:global:"
     })
-})
+}))
 app.use("/api", globalApiLimiter)
 
 // NEW (production hardening): a health-check endpoint for uptime monitoring
@@ -109,6 +110,7 @@ app.use("/api/user", userRouter)
 app.use("/api/shop", shopRouter)
 app.use("/api/item", itemRouter)
 app.use("/api/order", orderRouter)
+app.use("/api/offer", offerRouter)
 
 // Must be registered AFTER all routes but BEFORE the existing error-handling
 // middleware below — this is what actually reports errors to Sentry; the

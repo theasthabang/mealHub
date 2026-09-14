@@ -123,7 +123,7 @@ const userSlice = createSlice({
     // is only ever dispatched against the USER's myOrders (owner cancellations don't
     // exist — only customers cancel, via updateOrderStatus above instead).
     cancelOrderStatus: (state, action) => {
-      const { orderId, shopId, cancelReason, refundAmount, refundStatus } = action.payload
+      const { orderId, shopId, cancelReason, refundAmount, refundStatus, refundedAt } = action.payload
       const order = state.myOrders.find(o => o._id == orderId)
       if (order) {
         const shopOrder = order.shopOrders.find(so => so.shop._id == shopId)
@@ -136,6 +136,7 @@ const userSlice = createSlice({
           if (refundAmount !== undefined) {
             shopOrder.refundAmount = refundAmount
             shopOrder.refundStatus = refundStatus
+            shopOrder.refundedAt = refundedAt
           }
         }
       }
